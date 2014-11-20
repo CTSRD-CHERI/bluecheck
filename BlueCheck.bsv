@@ -279,7 +279,7 @@ endfunction
 
 // Turn the list of items gathered in a BlueCheck module into an
 // actual equivalence checker.
-module [Module] blueCheckGo#(BlueCheck#(Empty) bc, Bool goFlag)();
+module [Module] blueCheckStmt#(BlueCheck#(Empty) bc) (Stmt);
   // Extract items.
   let {_, items} <- getCollection(bc);
   let actionItems = concat(map(getActionItem, items));
@@ -365,30 +365,26 @@ module [Module] blueCheckGo#(BlueCheck#(Empty) bc, Bool goFlag)();
     $display("No-op");
   endrule
 
-  rule initialise (goFlag && count == 0);
-    randomState.cntrl.init;
-    count <= 1;
-  endrule
+  Stmt checker =
+    seq
+      randomState.cntrl.init;
+      count <= 1;
+      while (count <= 10000)
+        action
+          await (!waitWire);
+          let nextState <- randomState.next;
+          state <= nextState;
+          count <= count+1;
+        endaction
+      $display("OK: passed ", count, " tests.");
+    endseq;
 
-  // Wander the state space.
-  rule wander (count > 0 && !waitWire);
-    count <= count+1;
-    if (count < 10000)
-      begin
-        let nextState <- randomState.next;
-        state <= nextState;
-      end
-    else
-      begin
-        $display("OK: passed ", count, " tests.");
-        $finish(0);
-      end
-  endrule
-
+  return checker;
 endmodule
 
 module [Module] blueCheck#(BlueCheck#(Empty) bc)();
-  blueCheckGo(bc, True);
+  Stmt s <- blueCheckStmt(bc);
+  mkAutoFSM(s);
 endmodule
 
 endpackage
