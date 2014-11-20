@@ -1,4 +1,10 @@
-// BlueCheck 0.1, M Naylor, 5 November 2012.
+// BlueCheck 0.11, M Naylor.
+
+// Change log
+// ==========
+//
+// 5  Nov 2012: Version 0.1
+// 20 Nov 2014: Added support for Action and ActionValue props
 
 package BlueCheck;
 
@@ -186,6 +192,28 @@ instance Prop#(Stmt);
   endmodule
 endinstance
 
+// Base case 2: execute action.
+instance Prop#(Action);
+  module [BlueCheck] pr#(List#(Fmt) app, Frequency fr, Action a) ();
+    Action act = action $display(formatApp(app)); a; endaction;
+    addToCollection(tagged ActionItem (tuple2(fr, act)));
+  endmodule
+endinstance
+
+// Base case 3: execute action-value
+instance Prop#(ActionValue#(t))
+  provisos(Eq#(t), Bits#(t, n));
+  module [BlueCheck] pr#(List#(Fmt) app, Frequency fr, ActionValue#(t) a) ();
+    Action act =
+      action
+        $display(formatApp(app));
+        t aVal <- a;
+        $display("   (Returned ", aVal, ")");
+      endaction;
+      addToCollection(tagged ActionItem (tuple2(fr, act)));
+  endmodule
+endinstance
+
 // Recursive case.
 instance Prop#(function b f(a x))
   provisos(Prop#(b), Bits#(a, n), Bounded#(a), FShow#(a));
@@ -251,7 +279,7 @@ endfunction
 
 // Turn the list of items gathered in a BlueCheck module into an
 // actual equivalence checker.
-module [Module] blueCheck#(BlueCheck#(Empty) bc)();
+module [Module] blueCheckGo#(BlueCheck#(Empty) bc, Bool goFlag)();
   // Extract items.
   let {_, items} <- getCollection(bc);
   let actionItems = concat(map(getActionItem, items));
@@ -269,7 +297,7 @@ module [Module] blueCheck#(BlueCheck#(Empty) bc)();
   Randomize#(State) randomState <-
     mkConstrainedRandomizer(0, fromInteger(numStates-1));
   Reg#(State) state <- mkReg(0);
-  Reg#(UInt#(16)) count <- mkReg(0);
+  Reg#(UInt#(20)) count <- mkReg(0);
   Wire#(Bool) waitWire <- mkDWire(False);
   List#(Bool) inState = stateConds(state, 1, freqs);
 
@@ -333,11 +361,11 @@ module [Module] blueCheck#(BlueCheck#(Empty) bc)();
     end
 
   // No-op.
-  rule noOp (state == 0);
+  rule noOp (count > 0 && state == 0);
     $display("No-op");
   endrule
 
-  rule initialise (count == 0);
+  rule initialise (goFlag && count == 0);
     randomState.cntrl.init;
     count <= 1;
   endrule
@@ -352,11 +380,15 @@ module [Module] blueCheck#(BlueCheck#(Empty) bc)();
       end
     else
       begin
-        $display("OK: passed", count, " tests.");
+        $display("OK: passed ", count, " tests.");
         $finish(0);
       end
   endrule
 
+endmodule
+
+module [Module] blueCheck#(BlueCheck#(Empty) bc)();
+  blueCheckGo(bc, True);
 endmodule
 
 endpackage
