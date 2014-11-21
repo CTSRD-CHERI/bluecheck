@@ -23,6 +23,10 @@ typedef struct {
   // Display message when a chosen state is a no-op
   Bool showNoOp;
 
+  // Statements to be added before and after a test run
+  Stmt preStmt;
+  Stmt postStmt;
+
   // Generate a checker based on an iterative deepening strategy
   // (If 'Invalid', a single random state walk is performed)
   Maybe#(ID_Params) iterativeDeepening;
@@ -418,6 +422,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
     seq
       randomState.cntrl.init;
       testDone <= False;
+      params.preStmt;
       $display("=== Depth %0d, Test %0d ===", currentDepth, testNum);
       while (! testDone)
         action
@@ -435,6 +440,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
                 end
               end
         endaction
+      params.postStmt;
       $display("OK: passed %0d iterations", params.numIterations);
     endseq;
 
@@ -453,6 +459,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
               seq
                 testDone <= False;
                 $display("=== Depth %0d, Test %0d ===", currentDepth, testNum);
+                params.preStmt;
                 while (! testDone)
                   action
                     await(!waitWire);
@@ -470,6 +477,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
                       end
                   endaction
                 testNum <= testNum+1;
+                params.postStmt;
                 idParams.rst.assertReset();
               endseq
             currentDepth <= idParams.incDepth(currentDepth);
@@ -489,6 +497,8 @@ BlueCheck_Params bcParamsSimple =
   BlueCheck_Params {
     showNonFire        : False
   , showNoOp           : False
+  , preStmt            : seq delay(1); endseq
+  , postStmt           : seq delay(1); endseq
   , iterativeDeepening : tagged Invalid
   , numIterations      : 1000
   };
@@ -509,6 +519,8 @@ function BlueCheck_Params bcParamsID(MakeResetIfc rst);
     BlueCheck_Params {
       showNonFire        : False
     , showNoOp           : False
+    , preStmt            : seq delay(1); endseq
+    , postStmt           : seq delay(1); endseq
     , iterativeDeepening : tagged Valid idParams
     , numIterations      : 3
     };
