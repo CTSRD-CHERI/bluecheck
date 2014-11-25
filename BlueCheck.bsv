@@ -505,14 +505,14 @@ BlueCheck_Params bcParamsSimple =
 
 // Default parameters for iterative deepening
 function BlueCheck_Params bcParamsID(MakeResetIfc rst);
-  function double(x) = x*2;
+  function incDepth(x) = x+1;
 
   ID_Params idParams =
     ID_Params {
       rst           : rst
-    , initialDepth  : 5
-    , testsPerDepth : 1000
-    , incDepth      : double
+    , initialDepth  : 3
+    , testsPerDepth : 3000
+    , incDepth      : incDepth
     };
 
   BlueCheck_Params params =
@@ -522,7 +522,7 @@ function BlueCheck_Params bcParamsID(MakeResetIfc rst);
     , preStmt            : seq delay(1); endseq
     , postStmt           : seq delay(1); endseq
     , iterativeDeepening : tagged Valid idParams
-    , numIterations      : 3
+    , numIterations      : 5
     };
 
   return params;
