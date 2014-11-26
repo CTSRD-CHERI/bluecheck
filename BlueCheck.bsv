@@ -1,11 +1,11 @@
-// BlueCheck 0.12, M Naylor.
+// BlueCheck 0.12, Matt N.
 
 // Change log
 // ==========
 //
 // 5  Nov 2012: Version 0.1
 // 20 Nov 2014: Support for Action and ActionValue props
-// 21 Nov 2014: Added iterative deepening capability
+// 21 Nov 2014: Support for iterative deepening
 
 package BlueCheck;
 
@@ -29,7 +29,8 @@ typedef struct {
 
   // Generate a checker based on an iterative deepening strategy
   // (If 'Invalid', a single random state walk is performed)
-  Maybe#(ID_Params) iterativeDeepening;
+  Bool useIterativeDeepening;
+  ID_Params id;
 
   // Number of testing iterations to perform. For iterative deepening,
   // this is the number of times to increase the depth before stopping
@@ -446,61 +447,58 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
 
   // Many short walks of the state space (iterative deepening).
   Stmt iterativeDeepening =
-    begin
-      let idParams = fromMaybe(?, params.iterativeDeepening);
+    seq
+      randomState.cntrl.init;
+      currentDepth <= params.id.initialDepth;
+      while (iterCount < params.numIterations)
+        seq
+          testNum <= 0;
+          while (testNum < params.id.testsPerDepth)
+            seq
+              testDone <= False;
+              $display("=== Depth %0d, Test %0d ===", currentDepth, testNum);
+              params.preStmt;
+              while (! testDone)
+                action
+                  await(!waitWire);
+                  let nextState <- randomState.next;
+                  state <= nextState;
+                  if (state != 0 && !didntFire)
+                    begin
+                      if (count < currentDepth)
+                        count <= count+1;
+                      else
+                        begin
+                          count <= 0;
+                          testDone <= True;
+                        end
+                    end
+                endaction
+              testNum <= testNum+1;
+              params.postStmt;
+              params.id.rst.assertReset();
+            endseq
+          currentDepth <= params.id.incDepth(currentDepth);
+          iterCount <= iterCount+1;
+        endseq
+      $display("OK: passed %0d test sequences",
+                 params.numIterations*params.id.testsPerDepth);
+    endseq;
 
-      seq
-        randomState.cntrl.init;
-        currentDepth <= idParams.initialDepth;
-        while (iterCount < params.numIterations)
-          seq
-            testNum <= 0;
-            while (testNum < idParams.testsPerDepth)
-              seq
-                testDone <= False;
-                $display("=== Depth %0d, Test %0d ===", currentDepth, testNum);
-                params.preStmt;
-                while (! testDone)
-                  action
-                    await(!waitWire);
-                    let nextState <- randomState.next;
-                    state <= nextState;
-                    if (state != 0 && !didntFire)
-                      begin
-                        if (count < currentDepth)
-                          count <= count+1;
-                        else
-                          begin
-                            count <= 0;
-                            testDone <= True;
-                          end
-                      end
-                  endaction
-                testNum <= testNum+1;
-                params.postStmt;
-                idParams.rst.assertReset();
-              endseq
-            currentDepth <= idParams.incDepth(currentDepth);
-            iterCount <= iterCount+1;
-          endseq
-        $display("OK: passed %0d test sequences",
-                   params.numIterations*idParams.testsPerDepth);
-      endseq;
-    end;
-
-  return isValid(params.iterativeDeepening) ?
+  return params.useIterativeDeepening ?
            iterativeDeepening : singleWalk;
 endmodule
 
 // Default parameters for single state walk
 BlueCheck_Params bcParamsSimple =
   BlueCheck_Params {
-    showNonFire        : False
-  , showNoOp           : False
-  , preStmt            : seq delay(1); endseq
-  , postStmt           : seq delay(1); endseq
-  , iterativeDeepening : tagged Invalid
-  , numIterations      : 1000
+    showNonFire           : False
+  , showNoOp              : False
+  , preStmt               : seq delay(1); endseq
+  , postStmt              : seq delay(1); endseq
+  , useIterativeDeepening : False
+  , id                    : ?
+  , numIterations         : 1000
   };
 
 // Default parameters for iterative deepening
@@ -517,12 +515,13 @@ function BlueCheck_Params bcParamsID(MakeResetIfc rst);
 
   BlueCheck_Params params =
     BlueCheck_Params {
-      showNonFire        : False
-    , showNoOp           : False
-    , preStmt            : seq delay(1); endseq
-    , postStmt           : seq delay(1); endseq
-    , iterativeDeepening : tagged Valid idParams
-    , numIterations      : 5
+      showNonFire           : False
+    , showNoOp              : False
+    , preStmt               : seq delay(1); endseq
+    , postStmt              : seq delay(1); endseq
+    , useIterativeDeepening : True
+    , id                    : idParams
+    , numIterations         : 5
     };
 
   return params;
