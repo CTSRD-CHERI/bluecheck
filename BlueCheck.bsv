@@ -30,7 +30,8 @@ typedef struct {
   // Generate a checker based on an iterative deepening strategy
   // (If 'Invalid', a single random state walk is performed)
   Bool useIterativeDeepening;
-  ID_Params id;
+  // This must contain valid data if 'useIterativeDeepening' is 'True'
+  ID_Params id; 
 
   // Number of testing iterations to perform. For iterative deepening,
   // this is the number of times to increase the depth before stopping
@@ -340,6 +341,9 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   Reg#(Bool) testDone <- mkReg(False);
   List#(Bool) inState = stateConds(state, 1, freqs);
 
+  // When all random generators have initialised
+  Reg#(Bool) randGensInitialised <- mkReg(False);
+
   // When count is 0 the checker is disabled
   Reg#(Bit#(32)) count <- mkReg(0);
   Bool enabled = count != 0;
@@ -358,6 +362,11 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
         gen;
       endrule
     end
+
+  // Signal when all random generators have initialised
+  rule initRandomGens;
+    randGensInitialised <= all(tpl_1, randomGens);
+  endrule
 
   // Generate rules to check invariant booleans.
   for (Integer i = 0; i < length(invariantBools); i=i+1)
@@ -422,6 +431,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   Stmt singleWalk =
     seq
       randomState.cntrl.init;
+      await(randGensInitialised);
       testDone <= False;
       params.preStmt;
       $display("=== Depth %0d, Test %0d ===", currentDepth, testNum);
@@ -449,6 +459,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   Stmt iterativeDeepening =
     seq
       randomState.cntrl.init;
+      await(randGensInitialised);
       currentDepth <= params.id.initialDepth;
       while (iterCount < params.numIterations)
         seq
