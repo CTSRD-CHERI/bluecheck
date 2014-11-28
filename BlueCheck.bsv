@@ -4,7 +4,6 @@
 // ==========
 //
 // 5  Nov 2012: Version 0.1
-// 20 Nov 2014: Support for Action and ActionValue props
 // 21 Nov 2014: Support for iterative deepening
 // 28 Nov 2014: Version 0.2, with support for shrinking
 
@@ -32,10 +31,6 @@ typedef struct {
 
   // Display message when a chosen state is a no-op
   Bool showNoOp;
-
-  // Statements to be added before and after a test run
-  Stmt preStmt;
-  Stmt postStmt;
 
   // Generate a checker based on an iterative deepening strategy
   // (If 'Invalid', a single random state walk is performed)
@@ -89,7 +84,9 @@ typedef union tagged {
   Tuple2#(Bool, function Action gen(Bool replay)) RandomGenItem;
   Tuple2#(Fmt, Bool) InvariantItem;
   Bool EnsureItem;
-  Tuple4#(Action, Action, Action, Action) LogItem;
+  Tuple3#(Action, Action, Action) LogItem;
+  Stmt PreStmtItem;
+  Stmt PostStmtItem;
 } Item;
 
 // Turn an item into a singleton action if it is an ActionItem.
@@ -129,10 +126,24 @@ function List#(Bool) getEnsureItem(Item item) =
   endcase;
 
 // Turn an item into a singleton statement if it is an LogItem.
-function List#(Tuple4#(Action, Action, Action, Action))
+function List#(Tuple3#(Action, Action, Action))
   getLogItem(Item item) =
   case (item) matches
     tagged LogItem .a: return Cons(a, Nil);
+    default: return Nil;
+  endcase;
+
+// Turn an item into a singleton statement if it is a PreStmtItem.
+function List#(Stmt) getPreStmtItem(Item item) =
+  case (item) matches
+    tagged PreStmtItem .a: return Cons(a, Nil);
+    default: return Nil;
+  endcase;
+
+// Turn an item into a singleton statement if it is a PostStmtItem.
+function List#(Stmt) getPostStmtItem(Item item) =
+  case (item) matches
+    tagged PostStmtItem .a: return Cons(a, Nil);
     default: return Nil;
   endcase;
 
@@ -242,13 +253,11 @@ instance Equiv#(function b f(a x))
       endrule
 
       Action logEnq   = aLog.enq(aReg);
-      Action logDeq   = aLog.deq;
       Action logRot   = action aLog.deq; aLog.enq(aLog.first); endaction;
       Action logClear = aLog.clear;
 
       addToCollection(tagged RandomGenItem (tuple2(!init, genRandom)));
-      addToCollection(tagged LogItem (tuple4
-        (logEnq, logDeq, logRot, logClear)));
+      addToCollection(tagged LogItem (tuple3(logEnq, logRot, logClear)));
 
       eq(List::append(app, Cons(fshow(aReg), Nil)),
            fr, f(aReg), g(aReg));
@@ -326,13 +335,11 @@ instance Prop#(function b f(a x))
       endrule
 
       Action logEnq   = aLog.enq(aReg);
-      Action logDeq   = aLog.deq;
       Action logRot   = action aLog.deq; aLog.enq(aLog.first); endaction;
       Action logClear = aLog.clear;
 
       addToCollection(tagged RandomGenItem (tuple2(!init, genRandom)));
-      addToCollection(tagged LogItem (tuple4
-        (logEnq, logDeq, logRot, logClear)));
+      addToCollection(tagged LogItem (tuple3(logEnq, logRot, logClear)));
 
       pr(List::append(app, Cons(fshow(aReg), Nil)), fr, f(aReg));
     endmodule
@@ -359,6 +366,15 @@ module [BlueCheck] getEnsure (Ensure);
   return ensureFunc;
 endmodule
 
+// Allow user to add custom pre/post statements for each test
+module [BlueCheck] addPreStmt#(Stmt pre) (Empty);
+  addToCollection(tagged PreStmtItem pre);
+endmodule
+
+module [BlueCheck] addPostStmt#(Stmt post) (Empty);
+  addToCollection(tagged PostStmtItem post);
+endmodule
+
 // Compute the condition for being in each state of the equivalance
 // checker. Some states are visited more frequently than others.
 function List#(Bool) stateConds(Reg#(State) s, Integer start,
@@ -372,9 +388,16 @@ function List#(Bool) stateConds(Reg#(State) s, Integer start,
     end
 endfunction
 
+// Sum a list
 function Integer sum(List#(Integer) xs);
   if (xs matches tagged Nil) return 0;
   else return (List::head(xs) + sum(List::tail(xs)));
+endfunction
+
+// Sequence a list of statements
+function Stmt seqList(List#(Stmt) xs);
+  if (xs matches tagged Nil) return (seq delay(1); endseq);
+  else return (seq List::head(xs); seqList(List::tail(xs)); endseq);
 endfunction
 
 // Turn the list of items gathered in a BlueCheck module into an
@@ -393,6 +416,8 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   let logItems       = concat(map(getLogItem, items));
   let ensureItems    = concat(map(getEnsureItem, items));
   let invariantBools = concat(map(getInvariantItem, items));
+  let preStmt        = seqList(concat(map(getPreStmtItem, items)));
+  let postStmt       = seqList(concat(map(getPostStmtItem, items)));
   let actionMsgs     = map(tpl_2, actionItems);
   let stmtMsgs       = map(tpl_2, stmtItems);
   let actions        = map(tpl_3, actionItems);
@@ -432,7 +457,6 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   FIFOF#(Bit#(64)) timeLog <- mkSizedFIFOF(logSize);
   Wire#(Bool) replayWire <- mkDWire(False);
   Wire#(Bool) logEnqWire <- mkDWire(False);
-  Wire#(Bool) logDeqWire <- mkDWire(False);
   Wire#(Bool) logRotWire <- mkDWire(False);
   Wire#(Bool) logClearWire <- mkDWire(False);
   Reg#(Bit#(32)) counterExampleLength <- mkReg(0);
@@ -545,20 +569,13 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
     for (Integer i = 0; i < length(logItems); i=i+1)
       begin
         let logEnq   = tpl_1(logItems[i]);
-        let logDeq   = tpl_2(logItems[i]);
-        let logRot   = tpl_3(logItems[i]);
-        let logClear = tpl_4(logItems[i]);
+        let logRot   = tpl_2(logItems[i]);
+        let logClear = tpl_3(logItems[i]);
 
         // Enqueue the current state into the log
         (* mutually_exclusive = "triggerEnq,triggerRot" *)
         rule triggerEnq (logEnqWire);
           logEnq;
-        endrule
-
-        // Delete the head of the log
-        (* mutually_exclusive = "triggerDeq,triggerRot" *)
-        rule triggerDeq (logDeqWire);
-          logDeq;
         endrule
 
         // Remove the head of the log and append it to the end
@@ -577,12 +594,6 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
     rule enqLogs (logEnqWire);
       stateLog.enq(state);
       timeLog.enq(timer);
-    endrule
-
-    (* mutually_exclusive = "deqLogs,rotLogs" *)
-    rule deqLogs(logDeqWire);
-      stateLog.deq;
-      timeLog.deq;
     endrule
 
     rule rotLogs (logRotWire);
@@ -611,7 +622,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       await(randGensInitialised);
       testDone <= False;
       resetTimer <= True;
-      params.preStmt;
+      preStmt;
       while (!testDone)
         action
           await(!waitWire);
@@ -636,14 +647,14 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
                 end
             end
         endaction
-      params.postStmt;
+      postStmt;
       if (failureFound)
         $display("FAILED.");
       else
         $display("OK: passed %0d iterations", params.numIterations);
     endseq;
 
-  // Replaying counter examples ===============================================
+  // Replaying and shrinking counter examples =================================
 
   Stmt shrink =
     seq
@@ -665,7 +676,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
           // Initialise replay
           resetFailure <= True;
           resetTimer <= True;
-          params.preStmt;
+          preStmt;
           while (count < counterExampleLength)
             action
               await(!waitWire);
@@ -685,6 +696,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
                 state <= 0;
             endaction
           count <= 0;
+          postStmt;
           if (!failureFound)
             omitMask[omitNum] <= False;
           omitNum <= omitNum+1;
@@ -723,8 +735,8 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
               endaction
 
               // Test sequence starts here
-              delay(1);         // To support replay/shrinking
-              params.preStmt;   // Execute user-defined pre-statement
+              delay(1);  // To support replay/shrinking
+              preStmt;   // Execute user-defined pre-statement
               while (!testDone)
                 action
                   // This action only fires when not waiting for a
@@ -756,7 +768,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
                         end
                     end
                 endaction
-              params.postStmt; // Execute user-defined post-statement
+              postStmt; // Execute user-defined post-statement
               // If a failure has still not been observed then reset
               // circuit in preparation for a new test sequence.
               action
@@ -790,8 +802,6 @@ BlueCheck_Params bcParamsSimple =
   BlueCheck_Params {
     showNonFire           : False
   , showNoOp              : False
-  , preStmt               : seq delay(1); endseq
-  , postStmt              : seq delay(1); endseq
   , useIterativeDeepening : False
   , useShrinking          : False
   , id                    : ?
@@ -814,8 +824,6 @@ function BlueCheck_Params bcParamsID(MakeResetIfc rst);
     BlueCheck_Params {
       showNonFire           : False
     , showNoOp              : False
-    , preStmt               : seq delay(1); endseq
-    , postStmt              : seq delay(1); endseq
     , useIterativeDeepening : True
     , useShrinking          : True
     , id                    : idParams
