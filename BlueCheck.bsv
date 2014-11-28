@@ -1,4 +1,4 @@
-// BlueCheck 0.12, Matt N.
+// BlueCheck 0.2, Matt N.
 
 // Change log
 // ==========
@@ -6,6 +6,7 @@
 // 5  Nov 2012: Version 0.1
 // 20 Nov 2014: Support for Action and ActionValue props
 // 21 Nov 2014: Support for iterative deepening
+// 28 Nov 2014: Version 0.2, with support for shrinking
 
 package BlueCheck;
 
@@ -14,8 +15,17 @@ import ModuleCollect :: *;
 import StmtFSM       :: *;
 import List          :: *;
 import Clocks        :: *;
+import FIFOF         :: *;
+import ConfigReg     :: *;
+import Vector        :: *;
+import Assert        :: *;
 
-// BlueCheck parameters
+// The max size of the log used for shrinking.  This is tricky to
+// implement as a module parameter, hence it is a global parameter.
+typedef 32 LogSize;
+Integer logSize = valueOf(LogSize);
+
+// BlueCheck module parameters
 typedef struct {
   // Display message when a chosen state does not fire
   Bool showNonFire;
@@ -32,6 +42,10 @@ typedef struct {
   Bool useIterativeDeepening;
   // This must contain valid data if 'useIterativeDeepening' is 'True'
   ID_Params id; 
+
+  // Attempt to shrink a counter example, if one is found
+  // (This is only valid for iterative deepening)
+  Bool useShrinking;
 
   // Number of testing iterations to perform. For iterative deepening,
   // this is the number of times to increase the depth before stopping
@@ -65,59 +79,78 @@ typedef UInt#(LogMaxStates) State;
 typedef Integer Frequency; // Range: 1 to 100.
 
 // A BlueCheck module implicitly collects actions, statements,
-// invariants and random generators, an allowing automatic creation of
-// an equivalance checker.
+// invariants, random generators and loggers, an allowing automatic
+// creation of an equivalance checker.
 typedef ModuleCollect#(Item) BlueCheck;
 
 typedef union tagged {
   Tuple3#(Frequency, Fmt, Action) ActionItem;
   Tuple3#(Frequency, Fmt, Stmt) StmtItem;
-  Tuple2#(Bool, Action) RandomGenItem;
+  Tuple2#(Bool, function Action gen(Bool replay)) RandomGenItem;
   Tuple2#(Fmt, Bool) InvariantItem;
+  Bool EnsureItem;
+  Tuple4#(Action, Action, Action, Action) LogItem;
 } Item;
 
 // Turn an item into a singleton action if it is an ActionItem.
 function List#(Tuple3#(Frequency, Fmt, Action)) getActionItem(Item item) =
   case (item) matches
-    tagged ActionItem .a: return cons(a, Nil);
+    tagged ActionItem .a: return Cons(a, Nil);
     default: return Nil;
   endcase;
 
 // Turn an item into a singleton action if it is an RandomGenItem.
-function List#(Tuple2#(Bool, Action)) getRandomGenItem(Item item) =
+function List#(Tuple2#(Bool, function Action gen(Bool replay)))
+  getRandomGenItem(Item item) =
   case (item) matches
-    tagged RandomGenItem .a: return cons(a, Nil);
+    tagged RandomGenItem .a: return Cons(a, Nil);
     default: return Nil;
   endcase;
 
 // Turn an item into a singleton pair if it is an InvariantItem.
 function List#(Tuple2#(Fmt, Bool)) getInvariantItem(Item item) =
   case (item) matches
-    tagged InvariantItem .a: return cons(a, Nil);
+    tagged InvariantItem .a: return Cons(a, Nil);
     default: return Nil;
   endcase;
 
 // Turn an item into a singleton statement if it is an StmtItem.
 function List#(Tuple3#(Frequency, Fmt, Stmt)) getStmtItem(Item item) =
   case (item) matches
-    tagged StmtItem .a: return cons(a, Nil);
+    tagged StmtItem .a: return Cons(a, Nil);
+    default: return Nil;
+  endcase;
+
+// Turn an item into a singleton statement if it is an EnsureItem.
+function List#(Bool) getEnsureItem(Item item) =
+  case (item) matches
+    tagged EnsureItem .a: return Cons(a, Nil);
+    default: return Nil;
+  endcase;
+
+// Turn an item into a singleton statement if it is an LogItem.
+function List#(Tuple4#(Action, Action, Action, Action))
+  getLogItem(Item item) =
+  case (item) matches
+    tagged LogItem .a: return Cons(a, Nil);
     default: return Nil;
   endcase;
 
 // Display a function application, where function and
 // arguments are available as Fmt items of a list.
 function Fmt formatApp(List#(Fmt) app);
-  if (tail(app) matches tagged Nil)
-    return head(app);
+  if (List::tail(app) matches tagged Nil)
+    return List::head(app);
   else 
-    return (head(app) + fshow("(") + formatArgs(tail(app)) + fshow(")"));
+    return (List::head(app) + fshow("(") +
+             formatArgs(List::tail(app)) + fshow(")"));
 endfunction
 
 function Fmt formatArgs(List#(Fmt) args);
-  if (tail(args) matches tagged Nil)
-    return head(args);
+  if (List::tail(args) matches tagged Nil)
+    return List::head(args);
   else
-    return (head(args) + fshow(",") + formatArgs(tail(args)));
+    return (List::head(args) + fshow(",") + formatArgs(List::tail(args)));
 endfunction
 
 // The following type class allows two functions of the same type to
@@ -131,12 +164,12 @@ endtypeclass
 
 module [BlueCheck] equiv#(String name, a f, a g) ()
     provisos(Equiv#(a));
-  eq(cons(fshow(name), nil), 1, f, g);
+  eq(Cons(fshow(name), Nil), 1, f, g);
 endmodule
 
 module [BlueCheck] equivf#(Frequency fr, String name, a f, a g) ()
     provisos(Equiv#(a));
-  eq(cons(fshow(name), nil), fr, f, g);
+  eq(Cons(fshow(name), Nil), fr, f, g);
 endmodule
 
 // Base case 1: execute two actions.
@@ -154,22 +187,25 @@ endinstance
 // Base case 2: execute two action-values,
 // and check equivalance of results.
 instance Equiv#(ActionValue#(t))
-  provisos(Eq#(t), Bits#(t, n));
+  provisos(Eq#(t), Bits#(t, n), FShow#(t));
   module [BlueCheck] eq#(List#(Fmt) app, Frequency fr
                                        , ActionValue#(t) a
                                        , ActionValue#(t) b) ();
+    Wire#(Bool) success <- mkDWire(True);
+    Wire#(t) aWire      <- mkDWire(?);
+    Wire#(t) bWire      <- mkDWire(?);
+    Fmt msg             =  fshow("Not equal: ") + fshow(aWire)
+                        +  fshow(" versus ")    + fshow(bWire);
+
     Action executeTwoAndCheck =
       action
-        t aVal <- a;
-        t bVal <- b;
-        if (aVal != bVal)
-          begin
-            $display("Not equal:", aVal, " versus ", bVal);
-            $finish(0);
-          end
+        t aVal <- a; aWire <= aVal;
+        t bVal <- b; bWire <= bVal;
+        if (aVal != bVal) success <= False;
       endaction;
       addToCollection(tagged ActionItem
         (tuple3(fr, formatApp(app), executeTwoAndCheck)));
+      addToCollection(tagged InvariantItem (tuple2(msg, success)));
   endmodule
 endinstance
 
@@ -192,11 +228,12 @@ instance Equiv#(function b f(a x))
       Reg#(Bool) init <- mkReg(True);
       Reg#(a) aReg <- mkRegU;
       Randomize#(a) aRandom <- mkGenericRandomizer;
+      FIFOF#(a) aLog <- mkUGSizedFIFOF(logSize);
 
-      Action genRandom =
+      function Action genRandom(Bool replay) =
         action
           let a <- aRandom.next;
-          aReg <= a;
+          aReg <= replay ? aLog.first : a;
         endaction;
 
       rule initialise (init);
@@ -204,18 +241,32 @@ instance Equiv#(function b f(a x))
         init <= False;
       endrule
 
-      addToCollection(tagged RandomGenItem (tuple2(!init, genRandom)));
+      Action logEnq   = aLog.enq(aReg);
+      Action logDeq   = aLog.deq;
+      Action logRot   = action aLog.deq; aLog.enq(aLog.first); endaction;
+      Action logClear = aLog.clear;
 
-      eq(append(app, cons(fshow(aReg), nil)), fr, f(aReg), g(aReg));
+      addToCollection(tagged RandomGenItem (tuple2(!init, genRandom)));
+      addToCollection(tagged LogItem (tuple4
+        (logEnq, logDeq, logRot, logClear)));
+
+      eq(List::append(app, Cons(fshow(aReg), Nil)),
+           fr, f(aReg), g(aReg));
     endmodule
 endinstance
 
 // Base case 4 (fall through): check that two values are equal.
 instance Equiv#(a) provisos(Eq#(a), FShow#(a));
   module [BlueCheck] eq#(List#(Fmt) app, Frequency fr, a x, a y) ();
+    Wire#(Bool) success <- mkDWire(True);
     Fmt fmt = formatApp(app) + fshow(" failed: ")
             + fshow(x) + fshow(" v ") + fshow(y);
-    addToCollection(tagged InvariantItem (tuple2(fmt, x == y)));
+
+    rule check;
+      if (x != y) success <= False;
+    endrule
+     
+    addToCollection(tagged InvariantItem (tuple2(fmt, success)));
   endmodule
 endinstance
 
@@ -239,15 +290,18 @@ instance Prop#(Action);
 endinstance
 
 // Base case 3: execute action-value
-instance Prop#(ActionValue#(t))
-  provisos(Eq#(t), Bits#(t, n));
-  module [BlueCheck] pr#(List#(Fmt) app, Frequency fr, ActionValue#(t) a) ();
+instance Prop#(ActionValue#(Bool));
+  module [BlueCheck] pr#(List#(Fmt) app,Frequency fr,ActionValue#(Bool) a) ();
+    Wire#(Bool) success <- mkDWire(True);
+    Fmt msg = fshow("Property failed");
+
     Action act =
       action
-        t aVal <- a;
-        $display("   (Returned ", aVal, ")");
+        Bool s <- a;
+        if (!s) success <= False;
       endaction;
       addToCollection(tagged ActionItem (tuple3(fr, formatApp(app), act)));
+      addToCollection(tagged InvariantItem (tuple2(msg, success)));
   endmodule
 endinstance
 
@@ -258,11 +312,12 @@ instance Prop#(function b f(a x))
       Reg#(Bool) init <- mkReg(True);
       Reg#(a) aReg <- mkRegU;
       Randomize#(a) aRandom <- mkGenericRandomizer;
+      FIFOF#(a) aLog <- mkUGSizedFIFOF(logSize);
 
-      Action genRandom =
+      function Action genRandom(Bool replay) =
         action
           let a <- aRandom.next;
-          aReg <= a;
+          aReg <= replay ? aLog.first : a;
         endaction;
 
       rule initialise (init);
@@ -270,30 +325,39 @@ instance Prop#(function b f(a x))
         init <= False;
       endrule
 
-      addToCollection(tagged RandomGenItem (tuple2(!init, genRandom)));
+      Action logEnq   = aLog.enq(aReg);
+      Action logDeq   = aLog.deq;
+      Action logRot   = action aLog.deq; aLog.enq(aLog.first); endaction;
+      Action logClear = aLog.clear;
 
-      pr(append(app, cons(fshow(aReg), nil)), fr, f(aReg));
+      addToCollection(tagged RandomGenItem (tuple2(!init, genRandom)));
+      addToCollection(tagged LogItem (tuple4
+        (logEnq, logDeq, logRot, logClear)));
+
+      pr(List::append(app, Cons(fshow(aReg), Nil)), fr, f(aReg));
     endmodule
 endinstance
 
 module [BlueCheck] prop#(String name, a f) ()
     provisos(Prop#(a));
-  pr(cons(fshow(name), nil), 1, f);
+  pr(Cons(fshow(name), Nil), 1, f);
 endmodule
 
 module [BlueCheck] propf#(Frequency fr, String name, a f) ()
     provisos(Prop#(a));
-  pr(cons(fshow(name), nil), fr, f);
+  pr(Cons(fshow(name), Nil), fr, f);
 endmodule
 
-function Action ensure(Bool b) =
-    action
-      if (!b)
-        begin
-          $display("'ensure' statement failed");
-          $finish(0);
-        end
-    endaction;
+// Ensure function -- for making assertions inside properties
+typedef (function Action f(Bool cond)) Ensure;
+
+module [BlueCheck] getEnsure (Ensure);
+  // Create ensure function
+  Wire#(Bool) ok <- mkDWire(True);
+  function Action ensureFunc(Bool cond) = action ok <= cond; endaction;
+  addToCollection(tagged EnsureItem ok);
+  return ensureFunc;
+endmodule
 
 // Compute the condition for being in each state of the equivalance
 // checker. Some states are visited more frequently than others.
@@ -302,31 +366,37 @@ function List#(Bool) stateConds(Reg#(State) s, Integer start,
   if (freqs matches tagged Nil) return Nil;
   else
     begin
-      Frequency f = head(freqs);
-      return (cons(s >= fromInteger(start) && s < fromInteger(start+f),
-        stateConds(s, start+f, tail(freqs))));
+      Frequency f = List::head(freqs);
+      return (Cons(s >= fromInteger(start) && s < fromInteger(start+f),
+        stateConds(s, start+f, List::tail(freqs))));
     end
 endfunction
 
 function Integer sum(List#(Integer) xs);
   if (xs matches tagged Nil) return 0;
-  else return (head(xs) + sum(tail(xs)));
+  else return (List::head(xs) + sum(List::tail(xs)));
 endfunction
 
 // Turn the list of items gathered in a BlueCheck module into an
 // actual equivalence checker.
 module [Module] blueCheckCore#( BlueCheck#(Empty) bc
                               , BlueCheck_Params params ) (Stmt);
+
   // Extract items.
+  let concat = List::concat;
+  let map    = List::map;
+  let append = List::append;
   let {_, items} <- getCollection(bc);
-  let actionItems = concat(map(getActionItem, items));
-  let stmtItems = concat(map(getStmtItem, items));
-  let randomGens = concat(map(getRandomGenItem, items));
+  let actionItems    = concat(map(getActionItem, items));
+  let stmtItems      = concat(map(getStmtItem, items));
+  let randomGens     = concat(map(getRandomGenItem, items));
+  let logItems       = concat(map(getLogItem, items));
+  let ensureItems    = concat(map(getEnsureItem, items));
   let invariantBools = concat(map(getInvariantItem, items));
-  let actionMsgs = map(tpl_2, actionItems);
-  let stmtMsgs = map(tpl_2, stmtItems);
-  let actions = map(tpl_3, actionItems);
-  let stmts = map(tpl_3, stmtItems);
+  let actionMsgs     = map(tpl_2, actionItems);
+  let stmtMsgs       = map(tpl_2, stmtItems);
+  let actions        = map(tpl_3, actionItems);
+  let stmts          = map(tpl_3, stmtItems);
 
   // Setup state machine for equivalence checking.
   // Note state 0 is a no-op state.
@@ -335,23 +405,65 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   Integer numStates = 1+sum(freqs);
   Randomize#(State) randomState <-
     mkConstrainedRandomizer(0, fromInteger(numStates-1));
-  Reg#(State) state <- mkReg(0);
+  ConfigReg#(State) state <- mkConfigReg(0);
   Wire#(Bool) waitWire <- mkDWire(False);
   Wire#(Bool) didntFire <- mkDWire(False);
   Reg#(Bool) testDone <- mkReg(False);
   List#(Bool) inState = stateConds(state, 1, freqs);
+  Reg#(Bool) shrinkingMode <- mkReg(False);
 
   // When all random generators have initialised
   Reg#(Bool) randGensInitialised <- mkReg(False);
 
-  // When count is 0 the checker is disabled
-  Reg#(Bit#(32)) count <- mkReg(0);
-  Bool enabled = count != 0;
+  // When count is 0, actions/statements are disabled
+  ConfigReg#(Bit#(32)) count <- mkConfigReg(0);
+  Bool actionsEnabled = count != 0;
 
-  // State for iterative-deepening
-  Reg#(Bit#(32)) currentDepth <- mkReg(0);
-  Reg#(Bit#(32)) testNum <- mkReg(0);
-  Reg#(Bit#(32)) iterCount <- mkReg(0);
+  // When delayed count is 0, invariant checking is disabled
+  ConfigReg#(Bit#(32)) delayedCount <- mkConfigReg(0);
+  Bool checkingEnabled = delayedCount != 0;
+
+  rule updateDelayedCount;
+    delayedCount <= count;
+  endrule
+
+  // Log/replay signals
+  FIFOF#(State) stateLog  <- mkSizedFIFOF(logSize);
+  FIFOF#(Bit#(64)) timeLog <- mkSizedFIFOF(logSize);
+  Wire#(Bool) replayWire <- mkDWire(False);
+  Wire#(Bool) logEnqWire <- mkDWire(False);
+  Wire#(Bool) logDeqWire <- mkDWire(False);
+  Wire#(Bool) logRotWire <- mkDWire(False);
+  Wire#(Bool) logClearWire <- mkDWire(False);
+  Reg#(Bit#(32)) counterExampleLength <- mkReg(0);
+  Reg#(Bit#(32)) omitNum <- mkReg(0);
+  Vector#(LogSize, Reg#(Bool)) omitMask <- replicateM(mkReg(False));
+
+  // Track failures
+  Reg#(Bool) failureReg    <- mkConfigReg(False);
+  Wire#(Bool) resetFailure <- mkDWire(False);
+  Bool ensureFailure    = List::any( \== (False), ensureItems);
+  Bool invariantFailure = (waitWire || !checkingEnabled) ? False
+                        : List::any( \== (False), map (tpl_2, invariantBools));
+  Bool failureFound     = ensureFailure || invariantFailure || failureReg;
+
+  rule trackFailure;
+    if (resetFailure)
+      failureReg <= False;
+    else if (ensureFailure || invariantFailure)
+      failureReg <= True;
+  endrule
+
+  // Local timer
+  Reg#(Bit#(64)) timer <- mkReg(0);
+  Wire#(Bool) resetTimer <- mkDWire(False);
+
+  rule incTimer;
+    if (resetTimer)
+      timer <= 0;
+    else
+      timer <= timer+1;
+  endrule
 
   // Generate rules to generate random data.
   for (Integer i = 0; i < length(randomGens); i=i+1)
@@ -359,13 +471,18 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       let go  = tpl_1(randomGens[i]);
       let gen = tpl_2(randomGens[i]);
       rule genRandomData (go && !waitWire);
-        gen;
+        gen(replayWire);
       endrule
     end
 
   // Signal when all random generators have initialised
   rule initRandomGens;
-    randGensInitialised <= all(tpl_1, randomGens);
+    randGensInitialised <= List::all(tpl_1, randomGens);
+  endrule
+
+  // Rules to check 'ensure' assertions.
+  rule checkEnsure (!failureReg && List::any( \== (False) , ensureItems));
+    $display("%0t: 'ensure' statement failed", timer);
   endrule
 
   // Generate rules to check invariant booleans.
@@ -373,12 +490,8 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
     begin
       let msg = tpl_1(invariantBools[i]);
       let b   = tpl_2(invariantBools[i]);
-      rule checkInvariantBool (enabled && !waitWire);
-        if (!b)
-          begin
-            $display(msg);
-            $finish(0);
-          end
+      rule checkInvariantBool (checkingEnabled && !failureReg && !waitWire);
+        if (!b) $display("%0t: ", timer, msg);
       endrule
     end
 
@@ -386,14 +499,16 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   for (Integer i = 0; i < length(actions); i=i+1)
     begin
       (* preempts = "runAction, runActionNotPossible" *)
-      rule runAction (enabled && inState[i] && !waitWire);
-        $display("%0t: ", $time, actionMsgs[i]);
+      rule runAction (actionsEnabled && inState[i] && !waitWire);
+        $display("%0t: ", timer, actionMsgs[i]);
         actions[i];
+        if (!shrinkingMode)
+          logEnqWire <= True;
       endrule
-      rule runActionNotPossible (enabled && inState[i] && !waitWire);
+      rule runActionNotPossible (actionsEnabled && inState[i] && !waitWire);
         didntFire <= True;
         if (params.showNonFire)
-          $display("%0t: [did not fire] ", $time, actionMsgs[i]);
+          $display("%0t: [did not fire] ", timer, actionMsgs[i]);
       endrule
     end
 
@@ -403,29 +518,91 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
     begin
       Integer s = length(actions)+i;
       Reg#(Bool) fsmRunning <- mkReg(False);
-      FSM fsm <- mkFSMWithPred(stmts[i], enabled && inState[s]);
+      FSM fsm <- mkFSMWithPred(stmts[i], actionsEnabled && inState[s]);
 
-      rule runStmt (enabled && inState[s] && !fsmRunning);
-        $display("%0t: ", $time, stmtMsgs[i]);
+      rule runStmt (actionsEnabled && inState[s] && !fsmRunning);
+        $display("%0t: ", timer, stmtMsgs[i]);
         fsm.start;
         fsmRunning <= True;
         waitWire <= True;
+        if (!shrinkingMode)
+          logEnqWire <= True;
       endrule
 
-      rule assertWait (enabled && inState[s] && fsmRunning && !fsm.done);
+      rule assertWait (actionsEnabled && inState[s] && fsmRunning && !fsm.done);
         waitWire <= True;
       endrule
 
-      rule finishStmt (enabled && inState[s] && fsmRunning && fsm.done);
+      rule finishStmt (actionsEnabled && inState[s] && fsmRunning && fsm.done);
         fsmRunning <= False;
       endrule
     end
 
+  // Generate rules to modify logs
+  if (params.useIterativeDeepening && params.useShrinking)
+  begin
+
+    for (Integer i = 0; i < length(logItems); i=i+1)
+      begin
+        let logEnq   = tpl_1(logItems[i]);
+        let logDeq   = tpl_2(logItems[i]);
+        let logRot   = tpl_3(logItems[i]);
+        let logClear = tpl_4(logItems[i]);
+
+        // Enqueue the current state into the log
+        (* mutually_exclusive = "triggerEnq,triggerRot" *)
+        rule triggerEnq (logEnqWire);
+          logEnq;
+        endrule
+
+        // Delete the head of the log
+        (* mutually_exclusive = "triggerDeq,triggerRot" *)
+        rule triggerDeq (logDeqWire);
+          logDeq;
+        endrule
+
+        // Remove the head of the log and append it to the end
+        rule triggerRot (logRotWire);
+          logRot;
+        endrule
+
+        // Clear the log
+        rule triggerClear (logClearWire);
+          logClear;
+        endrule
+      end
+
+    // Also update the state and timer logs
+    (* mutually_exclusive = "enqLogs,rotLogs" *)
+    rule enqLogs (logEnqWire);
+      stateLog.enq(state);
+      timeLog.enq(timer);
+    endrule
+
+    (* mutually_exclusive = "deqLogs,rotLogs" *)
+    rule deqLogs(logDeqWire);
+      stateLog.deq;
+      timeLog.deq;
+    endrule
+
+    rule rotLogs (logRotWire);
+      stateLog.enq(stateLog.first); stateLog.deq;
+      timeLog.enq(timeLog.first); timeLog.deq;
+    endrule
+
+    rule clearLogs (logClearWire);
+      stateLog.clear;
+      timeLog.clear;
+    endrule
+  end
+
   // No-op.
-  rule noOp (enabled && state == 0);
+  rule noOp (actionsEnabled && state == 0);
     if (params.showNoOp)
-      $display("%0t: No-op", $time);
+      $display("%0t: No-op", timer);
   endrule
+
+  // Single walk of state space ===============================================
 
   // One long walk of the state space.
   Stmt singleWalk =
@@ -433,67 +610,175 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       randomState.cntrl.init;
       await(randGensInitialised);
       testDone <= False;
+      resetTimer <= True;
       params.preStmt;
-      $display("=== Depth %0d, Test %0d ===", currentDepth, testNum);
-      while (! testDone)
+      while (!testDone)
         action
           await(!waitWire);
           let nextState <- randomState.next;
-          state <= nextState;
-          if (state != 0 && !didntFire)
+          if (failureFound)
             begin
-              if (count < params.numIterations)
-                count <= count+1;
-              else
+              count <= 0;
+              testDone <= True;
+            end
+          else
+            begin
+              state <= nextState;
+              if (state != 0 && !didntFire)
                 begin
-                  count <= 0;
-                  testDone <= True;
+                  if (count < params.numIterations)
+                    count <= count+1;
+                  else
+                    begin
+                      count <= 0;
+                      testDone <= True;
+                    end
                 end
-              end
+            end
         endaction
       params.postStmt;
-      $display("OK: passed %0d iterations", params.numIterations);
+      if (failureFound)
+        $display("FAILED.");
+      else
+        $display("OK: passed %0d iterations", params.numIterations);
     endseq;
 
-  // Many short walks of the state space (iterative deepening).
+  // Replaying counter examples ===============================================
+
+  Stmt shrink =
+    seq
+      // Initialise shrinker
+      action
+        omitNum <= 0;
+        shrinkingMode <= True;
+        for (Integer i=0; i < logSize; i=i+1) omitMask[i] <= False;
+      endaction
+
+      // Try to omit each element of the failing sequence, and if
+      // it succeeds, undo the omission.
+      while (omitNum <= counterExampleLength)
+        seq
+          $display("=== Shrink attempt %0d ===", omitNum);
+          omitMask[omitNum] <= True;
+          // Reset circuit under test
+          params.id.rst.assertReset();
+          // Initialise replay
+          resetFailure <= True;
+          resetTimer <= True;
+          params.preStmt;
+          while (count < counterExampleLength)
+            action
+              await(!waitWire);
+              if (timer+1 >= timeLog.first)
+                begin
+                  if (omitMask[count] == False)
+                    begin
+                      state <= stateLog.first;
+                      replayWire <= True;
+                    end
+                  else
+                    state <= 0;
+                  logRotWire <= True;
+                  count <= count+1;
+                end
+              else
+                state <= 0;
+            endaction
+          count <= 0;
+          if (!failureFound)
+            omitMask[omitNum] <= False;
+          omitNum <= omitNum+1;
+      endseq
+    endseq;
+
+  // Iterative deepening ======================================================
+
+  // State for iterative-deepening
+  Reg#(Bit#(32)) currentDepth <- mkReg(0);
+  Reg#(Bit#(32)) testNum <- mkReg(0);
+  Reg#(Bit#(32)) iterCount <- mkReg(0);
+
   Stmt iterativeDeepening =
     seq
+      // Initialise the random generators
       randomState.cntrl.init;
       await(randGensInitialised);
+
+      // Each iteration will produce N test sequences of size 'depth'.
+      // After each iteration, the depth is increased.
       currentDepth <= params.id.initialDepth;
-      while (iterCount < params.numIterations)
+      while (!failureFound && iterCount < params.numIterations)
         seq
+          // Produce a test sequence of size 'currentDepth'
           testNum <= 0;
-          while (testNum < params.id.testsPerDepth)
+          while (!failureFound && testNum < params.id.testsPerDepth)
             seq
-              testDone <= False;
-              $display("=== Depth %0d, Test %0d ===", currentDepth, testNum);
-              params.preStmt;
-              while (! testDone)
+              // Initialise test
+              action
+                $display("=== Depth %0d, Test %0d ===", currentDepth, testNum);
+                testDone <= False;
+                counterExampleLength <= currentDepth;
+                logClearWire <= True;
+                resetTimer <= True;
+              endaction
+
+              // Test sequence starts here
+              delay(1);         // To support replay/shrinking
+              params.preStmt;   // Execute user-defined pre-statement
+              while (!testDone)
                 action
+                  // This action only fires when not waiting for a
+                  // user-defined statement to finish.
                   await(!waitWire);
                   let nextState <- randomState.next;
-                  state <= nextState;
-                  if (state != 0 && !didntFire)
+                  if (failureFound)
                     begin
-                      if (count < currentDepth)
-                        count <= count+1;
-                      else
+                      // We found a counter example smaller than the depth
+                      counterExampleLength <= count;
+                      count <= 0;
+                      testDone <= True;
+                    end
+                  else
+                    begin
+                      // Change the state for the next clock cycle
+                      state <= nextState;
+                      if (state != 0 && !didntFire)
                         begin
-                          count <= 0;
-                          testDone <= True;
+                          // Is this the final element of the sequence?
+                          if (count < currentDepth)
+                            count <= count+1;
+                          else
+                            begin
+                              // A count of '0' disables the checker
+                              count <= 0;
+                              testDone <= True;
+                            end
                         end
                     end
                 endaction
-              testNum <= testNum+1;
-              params.postStmt;
-              params.id.rst.assertReset();
+              params.postStmt; // Execute user-defined post-statement
+              // If a failure has still not been observed then reset
+              // circuit in preparation for a new test sequence.
+              action
+                if (!failureFound)
+                  begin
+                    testNum <= testNum+1;
+                    params.id.rst.assertReset();
+                  end
+              endaction
             endseq
+
           currentDepth <= params.id.incDepth(currentDepth);
           iterCount <= iterCount+1;
         endseq
-      $display("OK: passed %0d test sequences",
-                 params.numIterations*params.id.testsPerDepth);
+
+      // We've reached the end of iterative deepening.  Either we
+      // found a failure or performed the desired number of tests.
+      if (!failureFound)
+        $display("OK: passed %0d test sequences",
+                   params.numIterations*params.id.testsPerDepth);
+      else if (params.useShrinking)
+        shrink;
     endseq;
 
   return params.useIterativeDeepening ?
@@ -508,6 +793,7 @@ BlueCheck_Params bcParamsSimple =
   , preStmt               : seq delay(1); endseq
   , postStmt              : seq delay(1); endseq
   , useIterativeDeepening : False
+  , useShrinking          : False
   , id                    : ?
   , numIterations         : 1000
   };
@@ -519,7 +805,7 @@ function BlueCheck_Params bcParamsID(MakeResetIfc rst);
   ID_Params idParams =
     ID_Params {
       rst           : rst
-    , initialDepth  : 3
+    , initialDepth  : 10
     , testsPerDepth : 3000
     , incDepth      : incDepth
     };
@@ -531,6 +817,7 @@ function BlueCheck_Params bcParamsID(MakeResetIfc rst);
     , preStmt               : seq delay(1); endseq
     , postStmt              : seq delay(1); endseq
     , useIterativeDeepening : True
+    , useShrinking          : True
     , id                    : idParams
     , numIterations         : 5
     };

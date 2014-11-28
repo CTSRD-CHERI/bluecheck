@@ -109,8 +109,8 @@ module mkBRAMStack (Stack#(n, a))
     topReg <= ram.read;
 
     /* Speculate that another pop is coming soon */
-    //ram.put(False, sp-1, ?); // INCORRECT
-    ram.put(False, sp-2, ?); // CORRECT
+    ram.put(False, sp-1, ?); // INCORRECT
+    //ram.put(False, sp-2, ?); // CORRECT
 
     /* Decrement stack pointer */
     sp <= sp-1;
@@ -181,6 +181,9 @@ module [BlueCheck] checkStackAlgWithReset#(Reset r) ();
   /* Instances */
   Stack#(8, UInt#(8)) s1 <- mkBRAMStack(reset_by r);
   Stack#(8, UInt#(8)) s2 <- mkBRAMStack(reset_by r);
+
+  /* This function allows us to make assertions in the properties */
+  Ensure ensure <- getEnsure;
 
   Stmt prop1 =
     seq
