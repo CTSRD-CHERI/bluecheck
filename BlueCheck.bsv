@@ -795,7 +795,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
               // Initialise test
               action
                 $write("=== Depth %0d, Test %0d/%0d ===%c", currentDepth,
-                  testNum, params.id.testsPerDepth, verbose ? 10 : 13);
+                  testNum+1, params.id.testsPerDepth, verbose ? 10 : 13);
                 testDone <= False;
                 counterExampleLength <= currentDepth;
                 logClearWire <= True;
@@ -849,7 +849,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       // We've reached the end of iterative deepening.  Either we
       // found a failure or performed the desired number of tests.
       if (!failureFound)
-        $display("OK: passed %0d test sequences",
+        $display("\nOK: passed %0d test sequences",
                    params.numIterations*params.id.testsPerDepth);
       else if (params.useShrinking)
         shrink;
@@ -907,7 +907,7 @@ BlueCheck_Params bcParamsSimple =
 
 // Default parameters for iterative deepening
 function BlueCheck_Params bcParamsID(MakeResetIfc rst);
-  function incDepth(x) = x+1;
+  function incDepth(x) = x+10;
 
   ID_Params idParams =
     ID_Params {
@@ -926,7 +926,7 @@ function BlueCheck_Params bcParamsID(MakeResetIfc rst);
     , interactive           : True
     , useShrinking          : True
     , id                    : idParams
-    , numIterations         : 1
+    , numIterations         : 2
     };
 
   return params;
