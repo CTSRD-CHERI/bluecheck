@@ -404,7 +404,6 @@ endfunction
 // actual equivalence checker.
 module [Module] blueCheckCore#( BlueCheck#(Empty) bc
                               , BlueCheck_Params params ) (Stmt);
-
   // Extract items.
   let concat = List::concat;
   let map    = List::map;
@@ -673,9 +672,14 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
           omitMask[omitNum] <= True;
           // Reset circuit under test
           params.id.rst.assertReset();
-          // Initialise replay
-          resetFailure <= True;
-          resetTimer <= True;
+          action
+            // Initialise replay
+            resetFailure <= True;
+            resetTimer <= True;
+          endaction
+
+          // Test sequence starts here
+          delay(1);
           preStmt;
           while (count < counterExampleLength)
             action
@@ -721,10 +725,21 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       currentDepth <= params.id.initialDepth;
       while (!failureFound && iterCount < params.numIterations)
         seq
+          // Check that the depth is OK
+          if (params.useShrinking && currentDepth >= fromInteger(logSize))
+            seq
+              $display("Maximum depth of %0d", logSize-1, " exceeded.");
+              $display("Increase the 'logSize' parameter in BlueCheck.bsv.");
+              $finish(0);
+            endseq
+
           // Produce a test sequence of size 'currentDepth'
           testNum <= 0;
           while (!failureFound && testNum < params.id.testsPerDepth)
             seq
+              // Reset the circuit under test
+              params.id.rst.assertReset();
+
               // Initialise test
               action
                 $display("=== Depth %0d, Test %0d ===", currentDepth, testNum);
@@ -735,7 +750,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
               endaction
 
               // Test sequence starts here
-              delay(1);  // To support replay/shrinking
+              delay(1);
               preStmt;   // Execute user-defined pre-statement
               while (!testDone)
                 action
@@ -769,15 +784,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
                     end
                 endaction
               postStmt; // Execute user-defined post-statement
-              // If a failure has still not been observed then reset
-              // circuit in preparation for a new test sequence.
-              action
-                if (!failureFound)
-                  begin
-                    testNum <= testNum+1;
-                    params.id.rst.assertReset();
-                  end
-              endaction
+              testNum <= testNum+1;
             endseq
 
           currentDepth <= params.id.incDepth(currentDepth);
