@@ -26,6 +26,9 @@ Integer logSize = valueOf(LogSize);
 
 // BlueCheck module parameters
 typedef struct {
+  // Verbose output
+  Bool verbose;
+
   // Display message when a chosen state does not fire
   Bool showNonFire;
 
@@ -37,6 +40,9 @@ typedef struct {
   Bool useIterativeDeepening;
   // This must contain valid data if 'useIterativeDeepening' is 'True'
   ID_Params id; 
+
+  // Interactive iterative deepening
+  Bool interactive;
 
   // Attempt to shrink a counter example, if one is found
   // (This is only valid for iterative deepening)
@@ -83,7 +89,7 @@ typedef union tagged {
   Tuple3#(Frequency, Fmt, Stmt) StmtItem;
   Tuple2#(Bool, function Action gen(Bool replay)) RandomGenItem;
   Tuple2#(Fmt, Bool) InvariantItem;
-  Bool EnsureItem;
+  Tuple2#(Bool, Reg#(Bool)) EnsureItem;
   Tuple3#(Action, Action, Action) LogItem;
   Stmt PreStmtItem;
   Stmt PostStmtItem;
@@ -119,7 +125,7 @@ function List#(Tuple3#(Frequency, Fmt, Stmt)) getStmtItem(Item item) =
   endcase;
 
 // Turn an item into a singleton statement if it is an EnsureItem.
-function List#(Bool) getEnsureItem(Item item) =
+function List#(Tuple2#(Bool, Reg#(Bool))) getEnsureItem(Item item) =
   case (item) matches
     tagged EnsureItem .a: return Cons(a, Nil);
     default: return Nil;
@@ -357,14 +363,28 @@ endmodule
 
 // Ensure function -- for making assertions inside properties
 typedef (function Action f(Bool cond)) Ensure;
+typedef (function Action f(Bool cond, Fmt msg)) EnsureMsg;
 
 module [BlueCheck] getEnsure (Ensure);
   // Create ensure function
   Wire#(Bool) ok <- mkDWire(True);
+  Reg#(Bool) showMsg <- mkReg(False);
   function Action ensureFunc(Bool cond) = action ok <= cond; endaction;
-  addToCollection(tagged EnsureItem ok);
+  addToCollection(tagged EnsureItem (tuple2(ok, showMsg)));
   return ensureFunc;
 endmodule
+
+module [BlueCheck] getEnsureMsg (EnsureMsg);
+  // Create ensure function
+  Wire#(Bool) ok <- mkDWire(True);
+  Reg#(Bool) showMsg <- mkReg(False);
+  function Action ensureFunc(Bool cond, Fmt msg) =
+    action ok <= cond; if (!cond && showMsg) $display(msg); endaction;
+  addToCollection(tagged EnsureItem (tuple2(ok, showMsg)));
+  return ensureFunc;
+endmodule
+
+function Action assignReg(t x, Reg#(t) r) = action r <= x; endaction;
 
 // Allow user to add custom pre/post statements for each test
 module [BlueCheck] addPreStmt#(Stmt pre) (Empty);
@@ -421,6 +441,8 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   let stmtMsgs       = map(tpl_2, stmtItems);
   let actions        = map(tpl_3, actionItems);
   let stmts          = map(tpl_3, stmtItems);
+  let ensureBools    = map(tpl_1, ensureItems);
+  let ensureShows    = map(tpl_2, ensureItems);
 
   // Setup state machine for equivalence checking.
   // Note state 0 is a no-op state.
@@ -433,8 +455,10 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   Wire#(Bool) waitWire <- mkDWire(False);
   Wire#(Bool) didntFire <- mkDWire(False);
   Reg#(Bool) testDone <- mkReg(False);
+  Reg#(Bool) doneUI <- mkReg(False);
   List#(Bool) inState = stateConds(state, 1, freqs);
   Reg#(Bool) shrinkingMode <- mkReg(False);
+  Reg#(Bool) verbose <- mkReg(params.verbose);
 
   // When all random generators have initialised
   Reg#(Bool) randGensInitialised <- mkReg(False);
@@ -465,7 +489,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   // Track failures
   Reg#(Bool) failureReg    <- mkConfigReg(False);
   Wire#(Bool) resetFailure <- mkDWire(False);
-  Bool ensureFailure    = List::any( \== (False), ensureItems);
+  Bool ensureFailure    = List::any( \== (False), ensureBools);
   Bool invariantFailure = (waitWire || !checkingEnabled) ? False
                         : List::any( \== (False), map (tpl_2, invariantBools));
   Bool failureFound     = ensureFailure || invariantFailure || failureReg;
@@ -504,8 +528,9 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   endrule
 
   // Rules to check 'ensure' assertions.
-  rule checkEnsure (!failureReg && List::any( \== (False) , ensureItems));
-    $display("%0t: 'ensure' statement failed", timer);
+  rule checkEnsure (!failureReg && List::any( \== (False) , ensureBools));
+    if (verbose)
+      $display("%0t: 'ensure' statement failed", timer);
   endrule
 
   // Generate rules to check invariant booleans.
@@ -514,7 +539,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       let msg = tpl_1(invariantBools[i]);
       let b   = tpl_2(invariantBools[i]);
       rule checkInvariantBool (checkingEnabled && !failureReg && !waitWire);
-        if (!b) $display("%0t: ", timer, msg);
+        if (!b && verbose) $display("%0t: ", timer, msg);
       endrule
     end
 
@@ -523,14 +548,15 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
     begin
       (* preempts = "runAction, runActionNotPossible" *)
       rule runAction (actionsEnabled && inState[i] && !waitWire);
-        $display("%0t: ", timer, actionMsgs[i]);
+        if (verbose)
+          $display("%0t: ", timer, actionMsgs[i]);
         actions[i];
         if (!shrinkingMode)
           logEnqWire <= True;
       endrule
       rule runActionNotPossible (actionsEnabled && inState[i] && !waitWire);
         didntFire <= True;
-        if (params.showNonFire)
+        if (params.showNonFire && verbose)
           $display("%0t: [did not fire] ", timer, actionMsgs[i]);
       endrule
     end
@@ -544,7 +570,8 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       FSM fsm <- mkFSMWithPred(stmts[i], actionsEnabled && inState[s]);
 
       rule runStmt (actionsEnabled && inState[s] && !fsmRunning);
-        $display("%0t: ", timer, stmtMsgs[i]);
+        if (verbose)
+          $display("%0t: ", timer, stmtMsgs[i]);
         fsm.start;
         fsmRunning <= True;
         waitWire <= True;
@@ -608,7 +635,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
 
   // No-op.
   rule noOp (actionsEnabled && state == 0);
-    if (params.showNoOp)
+    if (params.showNoOp && verbose)
       $display("%0t: No-op", timer);
   endrule
 
@@ -617,6 +644,12 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   // One long walk of the state space.
   Stmt singleWalk =
     seq
+      action
+        // Show ensure-failure messages?
+        let _ <- List::mapM(assignReg(True), ensureShows);
+      endaction
+
+      // Initialise
       randomState.cntrl.init;
       await(randGensInitialised);
       testDone <= False;
@@ -648,7 +681,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
         endaction
       postStmt;
       if (failureFound)
-        $display("FAILED.");
+        $display("FAILED: counter-example found.");
       else
         $display("OK: passed %0d iterations", params.numIterations);
     endseq;
@@ -668,7 +701,17 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       // it succeeds, undo the omission.
       while (omitNum <= counterExampleLength)
         seq
-          $display("=== Shrink attempt %0d ===", omitNum);
+          action
+            if (verbose) $display("=== Shrink attempt %0d ===", omitNum);
+            // Display counter example even if verbose == False
+            if (!verbose && omitNum == counterExampleLength)
+              begin
+                verbose <= True;
+                let _ <- List::mapM(assignReg(True), ensureShows);
+                $display("");
+              end
+          endaction
+
           omitMask[omitNum] <= True;
           // Reset circuit under test
           params.id.rst.assertReset();
@@ -705,6 +748,13 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
             omitMask[omitNum] <= False;
           omitNum <= omitNum+1;
       endseq
+
+      // Restore original settings
+      action
+        shrinkingMode <= False;
+        verbose <= params.verbose;
+        let _ <- List::mapM(assignReg(params.verbose), ensureShows);
+      endaction
     endseq;
 
   // Iterative deepening ======================================================
@@ -716,9 +766,11 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
 
   Stmt iterativeDeepening =
     seq
-      // Initialise the random generators
-      randomState.cntrl.init;
-      await(randGensInitialised);
+      // Initialisation
+      action
+        resetFailure <= True;
+        iterCount <= 0;
+      endaction
 
       // Each iteration will produce N test sequences of size 'depth'.
       // After each iteration, the depth is increased.
@@ -742,7 +794,8 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
 
               // Initialise test
               action
-                $display("=== Depth %0d, Test %0d ===", currentDepth, testNum);
+                $write("=== Depth %0d, Test %0d/%0d ===%c", currentDepth,
+                  testNum, params.id.testsPerDepth, verbose ? 10 : 13);
                 testDone <= False;
                 counterExampleLength <= currentDepth;
                 logClearWire <= True;
@@ -758,10 +811,12 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
                   // user-defined statement to finish.
                   await(!waitWire);
                   let nextState <- randomState.next;
+                  let actionFired = (state != 0 && !didntFire);
                   if (failureFound)
                     begin
                       // We found a counter example smaller than the depth
-                      counterExampleLength <= count;
+                      //counterExampleLength <= count;
+                      counterExampleLength <= actionFired ? count : count-1;
                       count <= 0;
                       testDone <= True;
                     end
@@ -769,7 +824,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
                     begin
                       // Change the state for the next clock cycle
                       state <= nextState;
-                      if (state != 0 && !didntFire)
+                      if (actionFired)
                         begin
                           // Is this the final element of the sequence?
                           if (count < currentDepth)
@@ -798,18 +853,53 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
                    params.numIterations*params.id.testsPerDepth);
       else if (params.useShrinking)
         shrink;
+      else
+        $display("\nFAILED: counter-example found");
+      
     endseq;
 
+  // Iterative deepening (with iteraction) ====================================
+
+  Stmt iterativeDeepeningTop =
+    seq
+      action
+        // Show ensure-failure messages?
+        let _ <- List::mapM(assignReg(params.verbose), ensureShows);
+      endaction
+
+      // Initialise the random generators
+      randomState.cntrl.init;
+      await(randGensInitialised);
+
+      // Loop while user demands it
+      while (! doneUI)
+        seq
+          iterativeDeepening;
+          if (params.interactive)
+            action
+              $display("Continue searching?\n",
+                       "Press ENTER to continue or Ctrl-D to stop: ");
+              int c <- $fgetc(stdin);
+              if (c < 0) doneUI <= True;
+            endaction
+          else
+            doneUI <= True;
+        endseq
+    endseq;
+
+  // Result of blueCheck module
   return params.useIterativeDeepening ?
-           iterativeDeepening : singleWalk;
+           iterativeDeepeningTop : singleWalk;
 endmodule
 
 // Default parameters for single state walk
 BlueCheck_Params bcParamsSimple =
   BlueCheck_Params {
-    showNonFire           : False
+    verbose               : True
+  , showNonFire           : False
   , showNoOp              : False
   , useIterativeDeepening : False
+  , interactive           : False
   , useShrinking          : False
   , id                    : ?
   , numIterations         : 1000
@@ -822,19 +912,21 @@ function BlueCheck_Params bcParamsID(MakeResetIfc rst);
   ID_Params idParams =
     ID_Params {
       rst           : rst
-    , initialDepth  : 10
-    , testsPerDepth : 3000
+    , initialDepth  : 20
+    , testsPerDepth : 10000
     , incDepth      : incDepth
     };
 
   BlueCheck_Params params =
     BlueCheck_Params {
-      showNonFire           : False
+      verbose               : False
+    , showNonFire           : False
     , showNoOp              : False
     , useIterativeDeepening : True
+    , interactive           : True
     , useShrinking          : True
     , id                    : idParams
-    , numIterations         : 5
+    , numIterations         : 1
     };
 
   return params;
