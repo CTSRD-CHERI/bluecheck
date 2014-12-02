@@ -36,7 +36,7 @@ typedef struct {
   Bool showNoOp;
 
   // Generate a checker based on an iterative deepening strategy
-  // (If 'Invalid', a single random state walk is performed)
+  // (If 'False', a single random state walk is performed)
   Bool useIterativeDeepening;
   // This must contain valid data if 'useIterativeDeepening' is 'True'
   ID_Params id; 
@@ -815,7 +815,6 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
                   if (failureFound)
                     begin
                       // We found a counter example smaller than the depth
-                      //counterExampleLength <= count;
                       counterExampleLength <= actionFired ? count : count-1;
                       count <= 0;
                       testDone <= True;
@@ -844,6 +843,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
 
           currentDepth <= params.id.incDepth(currentDepth);
           iterCount <= iterCount+1;
+          if (!failureFound) $display("");
         endseq
 
       // We've reached the end of iterative deepening.  Either we
