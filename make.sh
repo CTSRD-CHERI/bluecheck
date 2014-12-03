@@ -7,6 +7,7 @@ SUFFIXES=
 
 #TOPMOD=testStack
 TOPMOD=testStackID
+#TOPMOD=testStackAlg
 #TOPMOD=testStackAlgID
 TOPFILE=StackExample.bsv
 

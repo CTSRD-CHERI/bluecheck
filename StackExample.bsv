@@ -228,3 +228,7 @@ module [Module] testStackAlgID ();
   MakeResetIfc r <- mkReset(0, True, clk);
   blueCheckID(checkStackAlgWithReset(r.new_rst), r);
 endmodule
+
+module [Module] testStackAlg ();
+  blueCheck(checkStackAlgWithReset(noReset));
+endmodule

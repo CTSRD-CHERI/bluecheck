@@ -1,7 +1,8 @@
 ================================================================
 BlueCheck: A library for specification-based testing in Bluespec
 Matthew N, 4 Oct 2012
-Updated on 5 Nov 2012
+Updated 5 Nov 2012
+Updated 3 Dec 2014
 ================================================================
 
 BlueCheck is a library supporting specification-based testing in
@@ -42,24 +43,24 @@ test.
   endseq
 
 A successfull run of this test is reassuring, but I need more unit
-tests to be sure! Do I really have to write them all out by hand?  And
-what if I forget an important corner case?
+tests to be sure. Do I have to write them all out by hand?  And what
+if I forget a corner case?
 
 Option 2: Model-based testing
 =============================
 
 A second implementation (31 lines) of the stack module can be found in
-Appendix B.  It's much simpler than the first, using a register
-instead of a block RAM to store the elements.  It's really hard to see
-anything that could be wrong with it!  Unlike the first, it contains
-no assumptions about the RAM access protocol.  This second
-implementation could be viewed as an "executable specification" or a
-"reference implementation".
+Appendix B.  It's much simpler than the first, using registers instead
+of a block RAM to store the elements.  It's hard to see anything that
+could be wrong with it.  Unlike the first, it contains no assumptions
+about the RAM access protocol.  This second implementation could be
+viewed as an "executable specification" or a "reference
+implementation".
 
-Now testing is a case of showing that, to a user, the two modules
-behave identically.  How can I test that property in Bluespec?
+Now testing is a case of showing that the two modules behave
+identically.  How can I test that property in Bluespec?
 
-Using BlueCheck it's easy:
+Using BlueCheck I write:
 
   module [BlueCheck] checkBRAMStack ();
     /* Implementation instance (Appendix A) */
@@ -86,27 +87,29 @@ a synthesisable test bench out of a BlueCheck module, we write:
 
 BlueCheck will generate hardware to invoke random sequences of methods
 applied to random arguments, and will raise an error if the
-implementation ever differs from the specification.  For a taste of
-what's required without BlueCheck, see Appendix C.
+implementation ever differs from the spec.  For a taste of what's
+required without BlueCheck, see Appendix C.
 
 Running the test bench
 ======================
 
 What happens when I run it?
 
-  No-op
-  push( 81)
-  No-op
-  push( 41)
-  push(186)
-  push(242)
-  pop
-  pop
-  top failed:  41 v 186
+  4: push('h4)
+  6: pop
+  9: push('h3)
+  10: push('h9)
+  11: push('h6)
+  12: push('hd)
+  13: pop
+  14: pop
+  15: top failed: 'h9 v 'h6
+  15: push('h5)
+  FAILED: counter-example found.
 
 A bug! BlueCheck says that, after executing the above sequence of
-methods, the top stack element should be 41 (according to the
-specification) but it is actually 186 (according to the
+methods at the given times, the top stack element should be 9
+(according to the spec) but it is actually 6 (according to the
 implementation).  In Appendix A, the line
 
   ram.put(False, sp-1, ?);
@@ -115,15 +118,21 @@ should be
 
   ram.put(False, sp-2, ?);
 
+The above counter-example is not minimal, i.e. there exists a shorter
+sequence of instructions that reveals the bug.  BlueCheck has a
+feature called shrinking that allows smaller counter-examples to
+produced from larger ones.  This is discussed below.
+
 Thorough testing
 ================
 
-BlueCheck is able to invoke one method per clock cycle (if the methods
-allow it) so can in principle check hundreds of millions of method
-calls per second in a design clocking at 100Mhz.
+BlueCheck testbenches are synthesisable.  They may invoke one method
+per clock cycle (if the methods allow it) so can in principle check
+hundreds of millions of method calls per second in a design clocking
+at 100Mhz.
 
-IMPORTANT: type classes
-=======================
+Type classes
+============
 
 To use BlueCheck, the type of any argument or result of a method
 passed to equiv must be an instance of the following type classes.
@@ -263,32 +272,102 @@ Running the test bench
 
 What happens when I test the algebraic specification?
 
-  ...
-  prop1
-  prop4(246)
-  pop
-  push( 52)
-  prop3(246)
-  push( 37)
-  No-op
-  prop3( 87)
-  pop
-  prop3(152)
-  top failed:  37 v  52
+  3: prop2( 93)
+  8: prop4( 65)
+  13: prop4( 24)
+  18: prop1
+  23: prop3(100)
+  27: prop4( 36)
+  32: prop4(186)
+  37: prop1
+  42: prop2( 59)
+  47: prop1
+  52: prop4(163)
+  57: prop4(236)
+  62: push( 52)
+  63: prop3(246)
+  68: push( 37)
+  70: prop3( 87)
+  74: prop4(250)
+  79: prop3(124)
+  85: prop3(218)
+  90: pop
+  91: top failed: 250 v  37
+  91: pop
+  FAILED: counter-example found.
 
 We find the bug, again.
 
-Closing notes
-=============
+Shrinking
+=========
 
-Counter-examples found by BlueCheck may be large, consisting of many
-method invocations.  Support for shrinking, as done in Haskell's
-QuickCheck, is highly desirable.  This would require the ability to
-reset any Bluespec design back to its initial state.
+BlueCheck supports a feature known as 'shrinking' whereby
+counter-examples consisting of long sequences of method/property
+invocations can be reduced in size while still revealing a bug.
+Shrinking is not enabled by default because it requires an extra piece
+of information from the programmer, namely a reset signal that when
+asserted resets all modules under test (excluding, of course, the
+BlueCheck module itself).
+
+Stack example revisited
+=======================
+
+To support shrinking, the equivalance checker is now written as
+follows:
+
+  module [BlueCheck] checkBRAMStack (Reset r);
+    /* Implementation instance (Appendix A) */
+    Stack#(8, UInt#(8)) imp <- mkBRAMStack(reset_by r);
+
+    /* Specification instance (Appendix B) */
+    Stack#(8, UInt#(8)) spec <- mkStackSpec(reset_by r);
+
+    equiv("pop"    , spec.pop    , imp.pop);
+    equiv("push"   , spec.push   , imp.push);
+    equiv("isEmpty", spec.isEmpty, imp.isEmpty);
+    equiv("top"    , spec.top    , imp.top);
+  endmodule
+
+The only difference is the addtional reset parameter "Reset r" and the
+two "reset_by r" arguments passed to each module under test.
+
+To make a synthesisable test bench, we now write:
+
+  module mkTestBRAMStack ();
+    Clock clk <- exposeCurrentClock;
+    MakeResetIfc r <- mkReset(0, True, clk);
+    blueCheckID(checkBRAMStack(r.new_rst), r);
+  endmodule
+
+Running the test bench now gives a smaller counter-example:
+
+  === Depth 20, Test 1/10000 ===
+  7: push('h9)
+  8: push('h6)
+  9: push('hd)
+  10: pop
+  11: pop
+  12: top failed: 'h9 v 'h6
+  Continue searching?
+  Press ENTER to continue or Ctrl-D to stop: 
+
+Iterative deepening
+===================
+
+When supplied with a reset signal, BlueCheck operates in 'iterative
+deepening' mode whereby it generates lots of short test sequences,
+gradually increasting the depth (i.e. the size of these sequences).
+In the above example, BlueCheck started at depth 20 and found a
+counter-example (of length no larger than 20) and shrunk it to a
+counter example of length 6.  In 'iterative deepening' mode, the user
+has the option to continue testing with the possibility of finding a
+simpler counter-example.
+
+Future work
+===========
 
 If a method can fire in either the specification OR the implementation
-(but not both) then a problem will never be reported.  In other words,
-we test behavioural equivalence but not timing equivalence.
+(but not both) then a problem can never be reported.
 
 Currently, the generated testbench will not explore the possibility of
 different methods being invoked in parallel.
