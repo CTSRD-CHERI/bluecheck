@@ -2,7 +2,7 @@
 BlueCheck: A library for specification-based testing in Bluespec
 Matthew N, 4 Oct 2012
 Updated 5 Nov 2012
-Updated 3 Dec 2014
+Updated 6 Dec 2014
 ================================================================
 
 BlueCheck is a library supporting specification-based testing in
@@ -348,8 +348,27 @@ Running the test bench now gives a smaller counter-example:
   10: pop
   11: pop
   12: top failed: 'h9 v 'h6
+  Saving counter-example to 'CounterExample.bin'
   Continue searching?
   Press ENTER to continue or Ctrl-D to stop: 
+
+Replaying counter-examples
+==========================
+
+(This feature is only supported in simulation.)
+
+Notice that the above counter-example has been saved to a file.  It
+can be replayed in isolation (perhaps with debugging enabled) by
+passing "+replay" as an argument the generated BlueSim executable.
+
+  # testStackID +replay
+  Loading counter-example from 'CounterExample.bin'
+  6: push('h9)
+  7: push('h6)
+  8: push('hd)
+  9: pop
+  10: pop
+  11: top failed: 'h9 v 'h6
 
 Iterative deepening
 ===================

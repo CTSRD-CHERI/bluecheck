@@ -1,4 +1,4 @@
-// BlueCheck 0.2, Matt N.
+// BlueCheck 0.21, Matt N.
 
 // Change log
 // ==========
@@ -6,6 +6,7 @@
 // 5  Nov 2012: Version 0.1
 // 21 Nov 2014: Support for iterative deepening
 // 28 Nov 2014: Version 0.2, with support for shrinking
+// 6  Dec 2014: Save a counter-example to a file and replay it
 
 package BlueCheck;
 
@@ -23,6 +24,10 @@ import Assert        :: *;
 // implement as a module parameter, hence it is a global parameter.
 typedef 32 LogSize;
 Integer logSize = valueOf(LogSize);
+
+// The filename used to store a counter-example so it can be replayed
+// in isolation in a future simulation run with debugging enabled.
+String logFilename = "CounterExample.bin";
 
 // BlueCheck module parameters
 typedef struct {
@@ -79,6 +84,43 @@ typedef UInt#(LogMaxStates) State;
 // The frequency that the checker will move to particular state.
 typedef Integer Frequency; // Range: 1 to 100.
 
+// Serialise / Deserialise counter-examples ===================================
+
+// When a counter-example is found in simulation, we can save it to a
+// file so that it can be replayed in isolation in a subsequent run
+// with debugging enabled.  This feature is not synthesisable, but
+// it's very handy in simulation.  Thanks to Jon Woodruff for this
+// suggestion.
+
+// Serialise data of type t to a sequence of bytes and append to a file
+// (This definition is a bit obfusticated but it's the only way I
+// found that doesn't introduce an ugly type constraint)
+function Action putFile(File f, t data)
+  provisos ( Bits#(t, width)
+           , Div#(width, 8, nbytes) ) =
+  action
+    Bit#(TAdd#(width, 8)) block = zeroExtend(pack(data));
+    Vector#(nbytes, Bit#(8)) bytes =
+      unpack(block[valueOf(TMul#(nbytes, 8))-1:0]);
+    for (Integer i = 0; i < valueOf(nbytes); i=i+1)
+      $fwrite(f, "%c", bytes[i]);
+  endaction;
+
+// De-serialise a sequence of bytes from a file and convert to data of type t
+function ActionValue#(t) getFile(File f)
+  provisos ( Bits#(t, width)
+           , Div#(width, 8, nbytes) ) =
+    actionvalue
+      Vector#(nbytes, Bit#(8)) bytes;
+      for (Integer i = 0; i < valueOf(nbytes); i=i+1) begin
+        int c <- $fgetc(f);
+        bytes[i] = pack(c)[7:0];
+      end
+      return unpack(pack(bytes)[valueOf(width)-1:0]);
+    endactionvalue;
+
+// Functions for adding properties to the test bench ==========================
+
 // A BlueCheck module implicitly collects actions, statements,
 // invariants, random generators and loggers, an allowing automatic
 // creation of an equivalance checker.
@@ -91,6 +133,8 @@ typedef union tagged {
   Tuple2#(Fmt, Bool) InvariantItem;
   Tuple2#(Bool, Reg#(Bool)) EnsureItem;
   Tuple3#(Action, Action, Action) LogItem;
+  (function Action save(File f)) SaveItem;
+  (function Action restore(File f)) RestoreItem;
   Stmt PreStmtItem;
   Stmt PostStmtItem;
 } Item;
@@ -136,6 +180,20 @@ function List#(Tuple3#(Action, Action, Action))
   getLogItem(Item item) =
   case (item) matches
     tagged LogItem .a: return Cons(a, Nil);
+    default: return Nil;
+  endcase;
+
+// Turn a save item into a singleton statement if it is a SaveItem.
+function List#(function Action save(File f)) getSaveItem(Item item) =
+  case (item) matches
+    tagged SaveItem .a: return Cons(a, Nil);
+    default: return Nil;
+  endcase;
+
+// Turn a save item into a singleton statement if it is a SaveItem.
+function List#(function Action restore(File f)) getRestoreItem(Item item) =
+  case (item) matches
+    tagged RestoreItem .a: return Cons(a, Nil);
     default: return Nil;
   endcase;
 
@@ -262,8 +320,14 @@ instance Equiv#(function b f(a x))
       Action logRot   = action aLog.deq; aLog.enq(aLog.first); endaction;
       Action logClear = aLog.clear;
 
+      function save(file) = putFile(file, aLog.first);
+      function restore(file) =
+        action let x <- getFile(file); aLog.enq(x); endaction;
+
       addToCollection(tagged RandomGenItem (tuple2(!init, genRandom)));
       addToCollection(tagged LogItem (tuple3(logEnq, logRot, logClear)));
+      addToCollection(tagged SaveItem save);
+      addToCollection(tagged RestoreItem restore);
 
       eq(List::append(app, Cons(fshow(aReg), Nil)),
            fr, f(aReg), g(aReg));
@@ -344,8 +408,15 @@ instance Prop#(function b f(a x))
       Action logRot   = action aLog.deq; aLog.enq(aLog.first); endaction;
       Action logClear = aLog.clear;
 
+      function save(file) = putFile(file, aLog.first);
+      function restore(file) =
+        action let x <- getFile(file); aLog.enq(x); endaction;
+
+
       addToCollection(tagged RandomGenItem (tuple2(!init, genRandom)));
       addToCollection(tagged LogItem (tuple3(logEnq, logRot, logClear)));
+      addToCollection(tagged SaveItem save);
+      addToCollection(tagged RestoreItem restore);
 
       pr(List::append(app, Cons(fshow(aReg), Nil)), fr, f(aReg));
     endmodule
@@ -420,6 +491,8 @@ function Stmt seqList(List#(Stmt) xs);
   else return (seq List::head(xs); seqList(List::tail(xs)); endseq);
 endfunction
 
+// Construct checker ==========================================================
+
 // Turn the list of items gathered in a BlueCheck module into an
 // actual equivalence checker.
 module [Module] blueCheckCore#( BlueCheck#(Empty) bc
@@ -437,6 +510,8 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   let invariantBools = concat(map(getInvariantItem, items));
   let preStmt        = seqList(concat(map(getPreStmtItem, items)));
   let postStmt       = seqList(concat(map(getPostStmtItem, items)));
+  let saveFuncs      = concat(map(getSaveItem, items));
+  let restoreFuncs   = concat(map(getRestoreItem, items));
   let actionMsgs     = map(tpl_2, actionItems);
   let stmtMsgs       = map(tpl_2, stmtItems);
   let actions        = map(tpl_3, actionItems);
@@ -485,6 +560,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   Reg#(Bit#(32)) counterExampleLength <- mkReg(0);
   Reg#(Bit#(32)) omitNum <- mkReg(0);
   Vector#(LogSize, Reg#(Bool)) omitMask <- replicateM(mkReg(False));
+  Reg#(File) logFile <- mkReg(InvalidFile);
 
   // Track failures
   Reg#(Bool) failureReg    <- mkConfigReg(False);
@@ -686,7 +762,44 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
         $display("OK: passed %0d iterations", params.numIterations);
     endseq;
 
-  // Replaying and shrinking counter examples =================================
+  // Replay counter-example ===================================================
+
+  Stmt replay =
+    seq
+      // Reset circuit under test
+      params.id.rst.assertReset();
+      action
+        // Initialise replay
+        resetFailure <= True;
+        resetTimer <= True;
+      endaction
+
+      // Test sequence starts here
+      delay(1);
+      preStmt;
+      while (count < counterExampleLength)
+        action
+          await(!waitWire);
+          if (timer+1 >= timeLog.first)
+            begin
+              if (omitMask[count] == False)
+                begin
+                  state <= stateLog.first;
+                  replayWire <= True;
+                end
+              else
+                state <= 0;
+              logRotWire <= True;
+              count <= count+1;
+            end
+          else
+            state <= 0;
+        endaction
+      count <= 0;
+      postStmt;
+    endseq;
+
+  // Shrink counter-example ===================================================
 
   Stmt shrink =
     seq
@@ -713,37 +826,11 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
           endaction
 
           omitMask[omitNum] <= True;
-          // Reset circuit under test
-          params.id.rst.assertReset();
-          action
-            // Initialise replay
-            resetFailure <= True;
-            resetTimer <= True;
-          endaction
 
-          // Test sequence starts here
-          delay(1);
-          preStmt;
-          while (count < counterExampleLength)
-            action
-              await(!waitWire);
-              if (timer+1 >= timeLog.first)
-                begin
-                  if (omitMask[count] == False)
-                    begin
-                      state <= stateLog.first;
-                      replayWire <= True;
-                    end
-                  else
-                    state <= 0;
-                  logRotWire <= True;
-                  count <= count+1;
-                end
-              else
-                state <= 0;
-            endaction
-          count <= 0;
-          postStmt;
+          // Replay counter-example with omission
+          replay;
+
+          // If failure lost, undo omission
           if (!failureFound)
             omitMask[omitNum] <= False;
           omitNum <= omitNum+1;
@@ -757,12 +844,126 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       endaction
     endseq;
 
+  // Save a counter example to a file =========================================
+
+  Reg#(Bit#(32)) iterCount <- mkReg(0);
+
+  Stmt saveToFile =
+    seq
+      action
+        $display("Saving counter-example to '%s'", logFilename);
+
+        // Open file for writing
+        let file <- $fopen(logFilename, "w");
+
+        // Check result
+        if (file == InvalidFile) begin
+          $display("Can't open file '%s'", logFilename);
+          $finish(0);
+        end
+        logFile <= file;
+
+        // Write counter example length to file
+        putFile(file, counterExampleLength);
+
+        // Write the omit mask, i.e. the result of shrinking
+        putFile(file, readVReg(omitMask));
+
+        // Initialise
+        testDone <= False;
+        iterCount <= 0;
+      endaction
+
+      while (!testDone)
+        action
+          // Write first element of every log into file
+          putFile(logFile, timeLog.first);
+          putFile(logFile, stateLog.first);
+          for (Integer i = 0; i < length(saveFuncs); i=i+1)
+            saveFuncs[i](logFile);
+
+          // Rotate logs
+          logRotWire <= True;
+
+          // Increment loop counter
+          iterCount <= iterCount+1;
+          if (iterCount+1 == counterExampleLength) testDone <= True;
+        endaction
+
+      // Close file
+      $fclose(logFile);
+    endseq;
+
+  // Load a counter example from a file =======================================
+
+  Stmt loadFromFile =
+    seq
+      action
+        $display("Loading counter-example from '%s'", logFilename);
+
+        // Open file for reading
+        let file <- $fopen(logFilename, "r");
+
+        // Check result
+        if (file == InvalidFile) begin
+          $display("Can't open file '%s'", logFilename);
+          $finish(0);
+        end
+        logFile <= file;
+
+        // Read counter example length from file
+        let len <- getFile(file);
+        counterExampleLength <= len;
+
+        // Read omit mask from file
+        Vector#(LogSize, Bool) omit <- getFile(file);
+        for (Integer i = 0; i < logSize; i=i+1) omitMask[i] <= omit[i];
+
+        // Initialise
+        testDone <= False;
+        iterCount <= 0;
+      endaction
+
+      while (!testDone)
+        action
+          // To remove conflict warnings
+          await(!logEnqWire && !logRotWire);
+
+          // Read first element of every log into file
+          let t <- getFile(logFile);
+          timeLog.enq(t);
+          let s <- getFile(logFile);
+          stateLog.enq(s);
+          for (Integer i = 0; i < length(restoreFuncs); i=i+1)
+            restoreFuncs[i](logFile);
+
+          // Increment loop counter
+          iterCount <= iterCount+1;
+          if (iterCount+1 == counterExampleLength) testDone <= True;
+        endaction
+
+      // Close file
+      $fclose(logFile);
+    endseq;
+
+  // Replay counter example from file =========================================
+
+  Stmt replayFromFile =
+    seq
+      loadFromFile;
+      action
+        shrinkingMode <= True;
+        verbose <= True;
+        let _ <- List::mapM(assignReg(True), ensureShows);
+      endaction
+      replay;
+    endseq;
+
   // Iterative deepening ======================================================
 
   // State for iterative-deepening
   Reg#(Bit#(32)) currentDepth <- mkReg(0);
   Reg#(Bit#(32)) testNum <- mkReg(0);
-  Reg#(Bit#(32)) iterCount <- mkReg(0);
 
   Stmt iterativeDeepening =
     seq
@@ -852,7 +1053,10 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
         $display("\nOK: passed %0d test sequences",
                    params.numIterations*params.id.testsPerDepth);
       else if (params.useShrinking)
-        shrink;
+        seq
+          shrink;
+          saveToFile;
+         endseq
       else
         $display("\nFAILED: counter-example found");
       
@@ -860,7 +1064,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
 
   // Iterative deepening (with iteraction) ====================================
 
-  Stmt iterativeDeepeningTop =
+  Stmt iterativeDeepeningUI =
     seq
       action
         // Show ensure-failure messages?
@@ -887,9 +1091,25 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
         endseq
     endseq;
 
+  // Top-level iterative deepening checker for simulation =====================
+
+  Reg#(Bool) replayFromFileMode <- mkReg(False);
+
+  Stmt iterativeDeepeningTop =
+    seq
+      action
+         let b <- $test$plusargs("replay");
+         replayFromFileMode <= b;
+      endaction
+      if (replayFromFileMode)
+        replayFromFile;
+      else
+        iterativeDeepeningUI;
+    endseq;
+
   // Result of blueCheck module
-  return params.useIterativeDeepening ?
-           iterativeDeepeningTop : singleWalk;
+  return params.useIterativeDeepening
+       ? iterativeDeepeningTop : singleWalk;
 endmodule
 
 // Default parameters for single state walk
