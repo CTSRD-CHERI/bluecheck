@@ -342,12 +342,12 @@ To make a synthesisable test bench, we now write:
 Running the test bench now gives a smaller counter-example:
 
   === Depth 20, Test 1/10000 ===
-  7: push('h9)
-  8: push('h6)
-  9: push('hd)
+  6: push('h9)
+  7: push('h6)
+  8: push('hd)
+  9: pop
   10: pop
-  11: pop
-  12: top failed: 'h9 v 'h6
+  11: top failed: 'h9 v 'h6
   Saving counter-example to 'CounterExample.bin'
   Continue searching?
   Press ENTER to continue or Ctrl-D to stop: 
