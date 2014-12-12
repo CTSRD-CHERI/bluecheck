@@ -352,14 +352,16 @@ Running the test bench now gives a smaller counter-example:
   Continue searching?
   Press ENTER to continue or Ctrl-D to stop: 
 
+Notice that the above counter-example has been saved to a file during
+simulation.  (In future we hope to send it over the UART when running
+on FPGA.)
+
 Replaying counter-examples
 ==========================
 
-(This feature is only supported in simulation.)
-
-Notice that the above counter-example has been saved to a file.  It
-can be replayed in isolation (perhaps with debugging enabled) by
-passing "+replay" as an argument the generated BlueSim executable.
+We can replay the counter-example in isolation (perhaps with debugging
+enabled) by passing "+replay" as an argument the generated BlueSim
+executable.
 
   # testStackID +replay
   Loading counter-example from 'CounterExample.bin'
