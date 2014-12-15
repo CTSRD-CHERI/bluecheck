@@ -808,7 +808,10 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
           else
             state <= 0;
         endaction
-      count <= 0;
+      action
+        await(!waitWire);
+        count <= 0;
+      endaction
       postStmt;
     endseq;
 
