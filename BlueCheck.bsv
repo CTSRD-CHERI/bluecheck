@@ -119,6 +119,31 @@ function ActionValue#(t) getFile(File f)
       return unpack(pack(bytes)[valueOf(width)-1:0]);
     endactionvalue;
 
+// For displaying function applications =======================================
+
+typedef struct {
+  String name;
+  List#(Fmt) args;
+} App;
+
+function Fmt formatApp(App app);
+  if (app.args matches tagged Nil)
+    return $format("%s", app.name);
+  else 
+    return ($format("%s", app.name) + fshow("(") +
+            formatArgs(app.args) + fshow(")"));
+endfunction
+
+function Fmt formatArgs(List#(Fmt) args);
+  if (List::tail(args) matches tagged Nil)
+    return List::head(args);
+  else
+    return (List::head(args) + fshow(",") + formatArgs(List::tail(args)));
+endfunction
+
+function App appendArg(App app, Fmt arg) =
+  App { name: app.name, args: List::append(app.args, Cons(arg, Nil)) };
+
 // Functions for adding properties to the test bench ==========================
 
 // A BlueCheck module implicitly collects actions, statements,
@@ -127,8 +152,8 @@ function ActionValue#(t) getFile(File f)
 typedef ModuleCollect#(Item) BlueCheck;
 
 typedef union tagged {
-  Tuple3#(Frequency, Fmt, Action) ActionItem;
-  Tuple3#(Frequency, Fmt, Stmt) StmtItem;
+  Tuple3#(Frequency, App, Action) ActionItem;
+  Tuple3#(Frequency, App, Stmt) StmtItem;
   Tuple2#(Bool, function Action gen(Bool replay)) RandomGenItem;
   Tuple2#(Fmt, Bool) InvariantItem;
   Tuple2#(Bool, Reg#(Bool)) EnsureItem;
@@ -140,7 +165,7 @@ typedef union tagged {
 } Item;
 
 // Turn an item into a singleton action if it is an ActionItem.
-function List#(Tuple3#(Frequency, Fmt, Action)) getActionItem(Item item) =
+function List#(Tuple3#(Frequency, App, Action)) getActionItem(Item item) =
   case (item) matches
     tagged ActionItem .a: return Cons(a, Nil);
     default: return Nil;
@@ -162,7 +187,7 @@ function List#(Tuple2#(Fmt, Bool)) getInvariantItem(Item item) =
   endcase;
 
 // Turn an item into a singleton statement if it is an StmtItem.
-function List#(Tuple3#(Frequency, Fmt, Stmt)) getStmtItem(Item item) =
+function List#(Tuple3#(Frequency, App, Stmt)) getStmtItem(Item item) =
   case (item) matches
     tagged StmtItem .a: return Cons(a, Nil);
     default: return Nil;
@@ -211,51 +236,36 @@ function List#(Stmt) getPostStmtItem(Item item) =
     default: return Nil;
   endcase;
 
-// Display a function application, where function and
-// arguments are available as Fmt items of a list.
-function Fmt formatApp(List#(Fmt) app);
-  if (List::tail(app) matches tagged Nil)
-    return List::head(app);
-  else 
-    return (List::head(app) + fshow("(") +
-             formatArgs(List::tail(app)) + fshow(")"));
-endfunction
-
-function Fmt formatArgs(List#(Fmt) args);
-  if (List::tail(args) matches tagged Nil)
-    return List::head(args);
-  else
-    return (List::head(args) + fshow(",") + formatArgs(List::tail(args)));
-endfunction
-
 // The following type class allows two functions of the same type to
 // be applied to random inputs.  If the return values differ, the
 // behaviour is to terminate with an error message (a counter-example
 // has been found).  The probability that the equivalence will be
 // checked on any given step can be specified.
 typeclass Equiv#(type a);
-  module [BlueCheck] eq#(List#(Fmt) app, Frequency fr, a f, a g) ();
+  module [BlueCheck] eq#(App app, Frequency fr, a f, a g) ();
 endtypeclass
 
 module [BlueCheck] equiv#(String name, a f, a g) ()
     provisos(Equiv#(a));
-  eq(Cons(fshow(name), Nil), 1, f, g);
+  App app = App { name: name, args: Nil};
+  eq(app, 1, f, g);
 endmodule
 
 module [BlueCheck] equivf#(Frequency fr, String name, a f, a g) ()
     provisos(Equiv#(a));
-  eq(Cons(fshow(name), Nil), fr, f, g);
+  App app = App { name: name, args: Nil};
+  eq(app, fr, f, g);
 endmodule
 
 // Base case 1: execute two actions.
 instance Equiv#(Action);
-  module [BlueCheck] eq#(List#(Fmt) app, Frequency fr, Action a, Action b) ();
+  module [BlueCheck] eq#(App app, Frequency fr, Action a, Action b) ();
     Action executeTwo =
       action
         a; b;
       endaction;
     addToCollection(tagged ActionItem
-      (tuple3(fr, formatApp(app), executeTwo)));
+      (tuple3(fr, app, executeTwo)));
   endmodule
 endinstance
 
@@ -263,9 +273,9 @@ endinstance
 // and check equivalance of results.
 instance Equiv#(ActionValue#(t))
   provisos(Eq#(t), Bits#(t, n), FShow#(t));
-  module [BlueCheck] eq#(List#(Fmt) app, Frequency fr
-                                       , ActionValue#(t) a
-                                       , ActionValue#(t) b) ();
+  module [BlueCheck] eq#(App app, Frequency fr
+                                , ActionValue#(t) a
+                                , ActionValue#(t) b) ();
     Wire#(Bool) success <- mkDWire(True);
     Wire#(t) aWire      <- mkDWire(?);
     Wire#(t) bWire      <- mkDWire(?);
@@ -279,16 +289,16 @@ instance Equiv#(ActionValue#(t))
         if (aVal != bVal) success <= False;
       endaction;
       addToCollection(tagged ActionItem
-        (tuple3(fr, formatApp(app), executeTwoAndCheck)));
+        (tuple3(fr, app, executeTwoAndCheck)));
       addToCollection(tagged InvariantItem (tuple2(msg, success)));
   endmodule
 endinstance
 
 // Base case 3: execute two statements.
 instance Equiv#(Stmt);
-  module [BlueCheck] eq#(List#(Fmt) app, Frequency fr, Stmt a, Stmt b) ();
+  module [BlueCheck] eq#(App app, Frequency fr, Stmt a, Stmt b) ();
     Stmt s = par a; b; endpar;
-    addToCollection(tagged StmtItem (tuple3(fr, formatApp(app), s)));
+    addToCollection(tagged StmtItem (tuple3(fr, app, s)));
   endmodule
 endinstance
 
@@ -297,9 +307,9 @@ endinstance
 // recurse on the resulting applications.
 instance Equiv#(function b f(a x))
   provisos(Equiv#(b), Bits#(a, n), Bounded#(a), FShow#(a));
-    module [BlueCheck] eq#(List#(Fmt) app, Frequency fr
-                                         , function b f(a x)
-                                         , function b g(a y))();
+    module [BlueCheck] eq#(App app, Frequency fr
+                                  , function b f(a x)
+                                  , function b g(a y))();
       Reg#(Bool) init <- mkReg(True);
       Reg#(a) aReg <- mkRegU;
       Randomize#(a) aRandom <- mkGenericRandomizer;
@@ -329,14 +339,13 @@ instance Equiv#(function b f(a x))
       addToCollection(tagged SaveItem save);
       addToCollection(tagged RestoreItem restore);
 
-      eq(List::append(app, Cons(fshow(aReg), Nil)),
-           fr, f(aReg), g(aReg));
+      eq(appendArg(app, fshow(aReg)), fr, f(aReg), g(aReg));
     endmodule
 endinstance
 
 // Base case 4 (fall through): check that two values are equal.
 instance Equiv#(a) provisos(Eq#(a), FShow#(a));
-  module [BlueCheck] eq#(List#(Fmt) app, Frequency fr, a x, a y) ();
+  module [BlueCheck] eq#(App app, Frequency fr, a x, a y) ();
     Wire#(Bool) success <- mkDWire(True);
     Fmt fmt = formatApp(app) + fshow(" failed: ")
             + fshow(x) + fshow(" v ") + fshow(y);
@@ -351,26 +360,26 @@ endinstance
 
 // Like the Equiv type-class, except for a single method.
 typeclass Prop#(type a);
-  module [BlueCheck] pr#(List#(Fmt) app, Frequency fr, a f) ();
+  module [BlueCheck] pr#(App app, Frequency fr, a f) ();
 endtypeclass
 
 // Base case 1: execute statement.
 instance Prop#(Stmt);
-  module [BlueCheck] pr#(List#(Fmt) app, Frequency fr, Stmt a) ();
-    addToCollection(tagged StmtItem (tuple3(fr, formatApp(app), a)));
+  module [BlueCheck] pr#(App app, Frequency fr, Stmt a) ();
+    addToCollection(tagged StmtItem (tuple3(fr, app, a)));
   endmodule
 endinstance
 
 // Base case 2: execute action.
 instance Prop#(Action);
-  module [BlueCheck] pr#(List#(Fmt) app, Frequency fr, Action a) ();
-    addToCollection(tagged ActionItem (tuple3(fr, formatApp(app), a)));
+  module [BlueCheck] pr#(App app, Frequency fr, Action a) ();
+    addToCollection(tagged ActionItem (tuple3(fr, app, a)));
   endmodule
 endinstance
 
 // Base case 3: execute action-value
 instance Prop#(ActionValue#(Bool));
-  module [BlueCheck] pr#(List#(Fmt) app,Frequency fr,ActionValue#(Bool) a) ();
+  module [BlueCheck] pr#(App app,Frequency fr,ActionValue#(Bool) a) ();
     Wire#(Bool) success <- mkDWire(True);
     Fmt msg = fshow("Property failed");
 
@@ -379,7 +388,7 @@ instance Prop#(ActionValue#(Bool));
         Bool s <- a;
         if (!s) success <= False;
       endaction;
-      addToCollection(tagged ActionItem (tuple3(fr, formatApp(app), act)));
+      addToCollection(tagged ActionItem (tuple3(fr, app, act)));
       addToCollection(tagged InvariantItem (tuple2(msg, success)));
   endmodule
 endinstance
@@ -387,7 +396,7 @@ endinstance
 // Recursive case.
 instance Prop#(function b f(a x))
   provisos(Prop#(b), Bits#(a, n), Bounded#(a), FShow#(a));
-    module [BlueCheck] pr#(List#(Fmt) app, Frequency fr, function b f(a x))();
+    module [BlueCheck] pr#(App app, Frequency fr, function b f(a x))();
       Reg#(Bool) init <- mkReg(True);
       Reg#(a) aReg <- mkRegU;
       Randomize#(a) aRandom <- mkGenericRandomizer;
@@ -418,18 +427,20 @@ instance Prop#(function b f(a x))
       addToCollection(tagged SaveItem save);
       addToCollection(tagged RestoreItem restore);
 
-      pr(List::append(app, Cons(fshow(aReg), Nil)), fr, f(aReg));
+      pr(appendArg(app, fshow(aReg)), fr, f(aReg));
     endmodule
 endinstance
 
 module [BlueCheck] prop#(String name, a f) ()
     provisos(Prop#(a));
-  pr(Cons(fshow(name), Nil), 1, f);
+  App app = App { name: name, args: Nil};
+  pr(app, 1, f);
 endmodule
 
 module [BlueCheck] propf#(Frequency fr, String name, a f) ()
     provisos(Prop#(a));
-  pr(Cons(fshow(name), Nil), fr, f);
+  App app = App { name: name, args: Nil};
+  pr(app, fr, f);
 endmodule
 
 // Ensure function -- for making assertions inside properties
@@ -512,8 +523,10 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   let postStmt       = seqList(concat(map(getPostStmtItem, items)));
   let saveFuncs      = concat(map(getSaveItem, items));
   let restoreFuncs   = concat(map(getRestoreItem, items));
-  let actionMsgs     = map(tpl_2, actionItems);
-  let stmtMsgs       = map(tpl_2, stmtItems);
+  let actionApps     = map(tpl_2, actionItems);
+  let stmtApps       = map(tpl_2, stmtItems);
+  let actionMsgs     = map(formatApp, actionApps);
+  let stmtMsgs       = map(formatApp, stmtApps);
   let actions        = map(tpl_3, actionItems);
   let stmts          = map(tpl_3, stmtItems);
   let ensureBools    = map(tpl_1, ensureItems);
