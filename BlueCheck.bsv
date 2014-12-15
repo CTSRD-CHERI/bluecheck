@@ -540,8 +540,8 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   Randomize#(State) randomState <-
     mkConstrainedRandomizer(0, fromInteger(numStates-1));
   ConfigReg#(State) state <- mkConfigReg(0);
-  Wire#(Bool) waitWire <- mkDWire(False);
-  Wire#(Bool) didntFire <- mkDWire(False);
+  PulseWire waitWire <- mkPulseWireOR;
+  PulseWire didFire <- mkPulseWireOR;
   Reg#(Bool) testDone <- mkReg(False);
   Reg#(Bool) doneUI <- mkReg(False);
   List#(Bool) inState = stateConds(state, 1, freqs);
@@ -567,7 +567,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   FIFOF#(State) stateLog  <- mkSizedFIFOF(logSize);
   FIFOF#(Bit#(64)) timeLog <- mkSizedFIFOF(logSize);
   Wire#(Bool) replayWire <- mkDWire(False);
-  Wire#(Bool) logEnqWire <- mkDWire(False);
+  PulseWire logEnqWire <- mkPulseWireOR;
   Wire#(Bool) logRotWire <- mkDWire(False);
   Wire#(Bool) logClearWire <- mkDWire(False);
   Reg#(Bit#(32)) counterExampleLength <- mkReg(0);
@@ -640,11 +640,10 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
         if (verbose)
           $display("%0t: ", timer, actionMsgs[i]);
         actions[i];
-        if (!shrinkingMode)
-          logEnqWire <= True;
+        if (!shrinkingMode) logEnqWire.send;
+        didFire.send;
       endrule
       rule runActionNotPossible (actionsEnabled && inState[i] && !waitWire);
-        didntFire <= True;
         if (params.showNonFire && verbose)
           $display("%0t: [did not fire] ", timer, actionMsgs[i]);
       endrule
@@ -663,17 +662,17 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
           $display("%0t: ", timer, stmtMsgs[i]);
         fsm.start;
         fsmRunning <= True;
-        waitWire <= True;
-        if (!shrinkingMode)
-          logEnqWire <= True;
+        waitWire.send;
+        if (!shrinkingMode) logEnqWire.send;
       endrule
 
       rule assertWait (actionsEnabled && inState[s] && fsmRunning && !fsm.done);
-        waitWire <= True;
+        waitWire.send;
       endrule
 
       rule finishStmt (actionsEnabled && inState[s] && fsmRunning && fsm.done);
         fsmRunning <= False;
+        didFire.send;
       endrule
     end
 
@@ -744,6 +743,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       testDone <= False;
       resetTimer <= True;
       preStmt;
+      count <= 1;
       while (!testDone)
         action
           await(!waitWire);
@@ -756,7 +756,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
           else
             begin
               state <= nextState;
-              if (state != 0 && !didntFire)
+              if (state != 0 && didFire)
                 begin
                   if (count < params.numIterations)
                     count <= count+1;
@@ -1022,13 +1022,14 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
               // Test sequence starts here
               delay(1);
               preStmt;   // Execute user-defined pre-statement
+              count <= 1;
               while (!testDone)
                 action
                   // This action only fires when not waiting for a
                   // user-defined statement to finish.
                   await(!waitWire);
                   let nextState <- randomState.next;
-                  let actionFired = (state != 0 && !didntFire);
+                  let actionFired = (state != 0 && didFire);
                   if (failureFound)
                     begin
                       // We found a counter example smaller than the depth
