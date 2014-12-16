@@ -7,7 +7,7 @@
 // 21 Nov 2014: Support for iterative deepening
 // 28 Nov 2014: Version 0.2, with support for shrinking
 // 6  Dec 2014: Save a counter-example to a file and replay it
-// 16 Dec 2014: Let states run in parallel using 'parallel' assertions
+// 16 Dec 2014: Let statements run in parallel using 'parallel' assertions
 
 package BlueCheck;
 

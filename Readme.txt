@@ -1,7 +1,6 @@
 ================================================================
 BlueCheck: A library for specification-based testing in Bluespec
 Matthew N, 4 Oct 2012
-Updated 5 Nov 2012
 Updated 6 Dec 2014
 ================================================================
 
@@ -297,6 +296,34 @@ What happens when I test the algebraic specification?
   FAILED: counter-example found.
 
 We find the bug, again.
+
+'parallel' assertions
+=====================
+
+Each 'equiv' or 'prop' statement may be conisdered impure (if it can
+mutate state) or pure (if it can not).  Impure statements, such as
+"push", "pop", and "clear" in the above example, are assumed to
+conflict, i.e. may not run in parallel.  This default behaviour can be
+overridden by a 'parallel' assertion.  For example, if we wish to
+state that "push" and "pop" may run in parallel, we write:
+
+  parallel(list("push", "pop"));
+
+Each 'parallel' assertion introduces a new state in the checker.  When
+in that state, the checker enables all statements named in the
+argument list.  The frequency at which this new state is visited can
+be specified:
+
+  // Try "push" and "pop" in parallel with a frequency of 2
+  parallelf(2, list("push", "pop"));
+
+Currently BlueCheck assumes that pure statements can always run in
+parallel with impure ones, so any assertions regarding pure statements
+will be ignored.  While this behaviour often works well, it is
+possible for a pure statement to conflict with an impure one if it
+introduces a cyclic dependency between rules, in which case the
+Bluespec compiler will issue a warning.  To remove such a conflict,
+the programmer can always wrap a pure statement up as an impure one.
 
 Shrinking
 =========
