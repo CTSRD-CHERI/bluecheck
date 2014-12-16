@@ -7,6 +7,7 @@
 // 21 Nov 2014: Support for iterative deepening
 // 28 Nov 2014: Version 0.2, with support for shrinking
 // 6  Dec 2014: Save a counter-example to a file and replay it
+// 16 Dec 2014: Let states run in parallel using 'parallel' assertions
 
 package BlueCheck;
 
@@ -18,7 +19,6 @@ import Clocks        :: *;
 import FIFOF         :: *;
 import ConfigReg     :: *;
 import Vector        :: *;
-import Assert        :: *;
 
 // The max size of the log used for shrinking.  This is tricky to
 // implement as a module parameter, hence it is a global parameter.
@@ -126,6 +126,8 @@ typedef struct {
   List#(Fmt) args;
 } App;
 
+function String getName(App app) = app.name;
+
 function Fmt formatApp(App app);
   if (app.args matches tagged Nil)
     return $format("%s", app.name);
@@ -162,6 +164,7 @@ typedef union tagged {
   (function Action restore(File f)) RestoreItem;
   Stmt PreStmtItem;
   Stmt PostStmtItem;
+  Tuple2#(Frequency, List#(String)) ParallelItem;
 } Item;
 
 // Turn an item into a singleton action if it is an ActionItem.
@@ -233,6 +236,14 @@ function List#(Stmt) getPreStmtItem(Item item) =
 function List#(Stmt) getPostStmtItem(Item item) =
   case (item) matches
     tagged PostStmtItem .a: return Cons(a, Nil);
+    default: return Nil;
+  endcase;
+
+// Turn an item into a singleton statement if it is a ParallelItem.
+function List#(Tuple2#(Frequency, List#(String)))
+    getParallelItem(Item item) =
+  case (item) matches
+    tagged ParallelItem .a: return Cons(a, Nil);
     default: return Nil;
   endcase;
 
@@ -477,6 +488,43 @@ module [BlueCheck] addPostStmt#(Stmt post) (Empty);
   addToCollection(tagged PostStmtItem post);
 endmodule
 
+// "Parallel" assertions ======================================================
+
+// Assert that a list of equivalences/properties can run in parallel.
+
+module [BlueCheck] parallel#(List#(String) names) (Empty);
+  addToCollection(tagged ParallelItem (tuple2(1, names)));
+endmodule
+
+module [BlueCheck] parallelf#(Frequency fr, List#(String) names) (Empty);
+  addToCollection(tagged ParallelItem (tuple2(fr, names)));
+endmodule
+
+// The following type-class allows convenient construction of lists, e.g.
+//
+//   List#(String) xs = list("push", "pop", "top");
+
+typeclass MkList#(type a, type b) dependencies (a determines b);
+  function a mkList(List#(b) acc);
+endtypeclass
+
+instance MkList#(List#(a), a);
+  function List#(a) mkList(List#(a) acc) = List::reverse(acc);
+endinstance
+
+instance MkList#(function b f(a elem), a) provisos (MkList#(b, a));
+  function mkList(acc, elem) = mkList(Cons(elem, acc));
+endinstance
+
+function b list() provisos (MkList#(b, a));
+  return mkList(Nil);
+endfunction
+
+// Is a list empty?
+function Bool isEmpty(List#(a) xs);
+  if (xs matches tagged Nil) return True; else return False;
+endfunction
+
 // Compute the condition for being in each state of the equivalance
 // checker. Some states are visited more frequently than others.
 function List#(Bool) stateConds(Reg#(State) s, Integer start,
@@ -485,16 +533,59 @@ function List#(Bool) stateConds(Reg#(State) s, Integer start,
   else
     begin
       Frequency f = List::head(freqs);
-      return (Cons(s >= fromInteger(start) && s < fromInteger(start+f),
-        stateConds(s, start+f, List::tail(freqs))));
+      Bool cond;
+      if (f == 1) cond = s == fromInteger(start);
+      else cond = s >= fromInteger(start) && s < fromInteger(start+f);
+      return (Cons(cond, stateConds(s, start+f, List::tail(freqs))));
     end
 endfunction
+
+// With the presence of 'conflict-free' assertions, it is possible to
+// be in multiple states at the same time.  The following function
+// will update the 'inState' mapping using the 'conflict-free' lists.
+function List#(Bool) mergeConds
+  ( List#(Bool) inState
+  , List#(String) stateNames
+  , List#(Bool) inStatePar
+  , List#(List#(String)) parLists
+  );
+
+  if (inState matches tagged Nil)
+    return Nil;
+  else begin
+    Bool cond            = List::head(inState);
+    String stateName     = List::head(stateNames);
+    let origInStatePar   = inStatePar;
+    let origParLists     = parLists;
+
+    while (! isEmpty(inStatePar)) begin
+      let condPar = List::head(inStatePar);
+      let parList = List::head(parLists);
+
+      if (List::elem(stateName, parList))
+        cond = cond || condPar;
+
+      inStatePar = List::tail(inStatePar);
+      parLists   = List::tail(parLists);
+    end
+
+    return Cons(cond, mergeConds( List::tail(inState)
+                                , List::tail(stateNames)
+                                , origInStatePar, origParLists ));
+  end
+endfunction
+
+// List utilities =============================================================
 
 // Sum a list
 function Integer sum(List#(Integer) xs);
   if (xs matches tagged Nil) return 0;
   else return (List::head(xs) + sum(List::tail(xs)));
 endfunction
+
+// Average
+function Integer average(List#(Integer) xs) =
+  div(sum(xs), length(xs));
 
 // Sequence a list of statements
 function Stmt seqList(List#(Stmt) xs);
@@ -512,6 +603,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   let concat = List::concat;
   let map    = List::map;
   let append = List::append;
+  let zip    = List::zip;
   let {_, items} <- getCollection(bc);
   let actionItems    = concat(map(getActionItem, items));
   let stmtItems      = concat(map(getStmtItem, items));
@@ -531,12 +623,20 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   let stmts          = map(tpl_3, stmtItems);
   let ensureBools    = map(tpl_1, ensureItems);
   let ensureShows    = map(tpl_2, ensureItems);
+  let actionNames    = map(getName, actionApps);
+  let stmtNames      = map(getName, stmtApps);
+  let actionFreqs    = map(tpl_1, actionItems);
+  let stmtFreqs      = map(tpl_1, stmtItems);
+  let parItems       = concat(map(getParallelItem, items));
+  let parFreqs       = map(tpl_1, parItems);
+  let parLists       = map(tpl_2, parItems);
 
   // Setup state machine for equivalence checking.
   // Note state 0 is a no-op state.
-  List#(Integer) freqs = append(map(tpl_1, actionItems),
-                                map(tpl_1, stmtItems));
-  Integer numStates = 1+sum(freqs);
+  List#(Integer) freqs = append(actionFreqs, stmtFreqs);
+  List#(Integer) allFreqs = append(freqs, parFreqs);
+  Integer sumFreqs = sum(freqs);
+  Integer numStates = 1+sumFreqs+sum(parFreqs);
   Randomize#(State) randomState <-
     mkConstrainedRandomizer(0, fromInteger(numStates-1));
   ConfigReg#(State) state <- mkConfigReg(0);
@@ -544,7 +644,11 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   PulseWire didFire <- mkPulseWireOR;
   Reg#(Bool) testDone <- mkReg(False);
   Reg#(Bool) doneUI <- mkReg(False);
-  List#(Bool) inState = stateConds(state, 1, freqs);
+  List#(Bool) inStateSeq = stateConds(state, 1, freqs);
+  List#(Bool) inStatePar = stateConds(state, 1+sumFreqs, parFreqs);
+  List#(Bool) inState = mergeConds(inStateSeq,
+                                   append(actionNames, stmtNames),
+                                   inStatePar, parLists);
   Reg#(Bool) shrinkingMode <- mkReg(False);
   Reg#(Bool) verbose <- mkReg(params.verbose);
 
