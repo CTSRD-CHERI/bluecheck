@@ -1091,6 +1091,12 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       action
         resetFailure <= True;
         iterCount <= 0;
+
+        // When not using shrinking, enable output
+        if (! params.useShrinking) begin
+          verbose <= True;
+          let _ <- List::mapM(assignReg(True), ensureShows);
+        end
       endaction
 
       // Each iteration will produce N test sequences of size 'depth'.
