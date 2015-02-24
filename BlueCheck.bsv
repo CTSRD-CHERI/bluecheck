@@ -540,9 +540,9 @@ function List#(Bool) stateConds(Reg#(State) s, Integer start,
     end
 endfunction
 
-// With the presence of 'conflict-free' assertions, it is possible to
+// With the presence of 'parallel' assertions, it is possible to
 // be in multiple states at the same time.  The following function
-// will update the 'inState' mapping using the 'conflict-free' lists.
+// will update the 'inState' mapping using the 'parallel' lists.
 function List#(Bool) mergeConds
   ( List#(Bool) inState
   , List#(String) stateNames
