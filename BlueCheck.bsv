@@ -1,17 +1,5 @@
-// BlueCheck 0.21, Matt N.
+// BlueCheck 0.3, Matt N
 
-// Change log
-// ==========
-//
-// 5  Nov 2012: Version 0.1
-// 21 Nov 2014: Support for iterative deepening
-// 28 Nov 2014: Version 0.2, with support for shrinking
-// 6  Dec 2014: Save a counter-example to a file and replay it
-// 16 Dec 2014: Let statements run in parallel using 'parallel' assertions
-
-package BlueCheck;
-
-import Randomizable  :: *;
 import ModuleCollect :: *;
 import StmtFSM       :: *;
 import List          :: *;
@@ -19,17 +7,12 @@ import Clocks        :: *;
 import FIFOF         :: *;
 import ConfigReg     :: *;
 import Vector        :: *;
+import LFSR          :: *;
 
-// The max size of the log used for shrinking.  This is tricky to
-// implement as a module parameter, hence it is a global parameter.
-typedef 32 LogSize;
-Integer logSize = valueOf(LogSize);
+// ============================================================================
+// Module parameters
+// ============================================================================
 
-// The filename used to store a counter-example so it can be replayed
-// in isolation in a future simulation run with debugging enabled.
-String logFilename = "CounterExample.bin";
-
-// BlueCheck module parameters
 typedef struct {
   // Verbose output
   Bool verbose;
@@ -43,23 +26,29 @@ typedef struct {
   // Generate a checker based on an iterative deepening strategy
   // (If 'False', a single random state walk is performed)
   Bool useIterativeDeepening;
-  // This must contain valid data if 'useIterativeDeepening' is 'True'
+  // This must contain valid data if 'useIterativeDeepening' is true
   ID_Params id; 
 
-  // Interactive iterative deepening
+  // Interactive iterative deepening (simulation only, must be
+  // disabled for synthesis)
   Bool interactive;
 
   // Attempt to shrink a counter example, if one is found
-  // (This is only valid for iterative deepening)
+  // (This is only valid when 'useIterativeDeepening' is true)
   Bool useShrinking;
 
   // Number of testing iterations to perform. For iterative deepening,
   // this is the number of times to increase the depth before stopping
   // Otherwise, the it's the length of the random state walk
   Bit#(32) numIterations;
+
+  // For synthesis, we use a FIFO for saving the state
+  // of the checker, rather than a file on the local filesystem.
+  Maybe#(FIFOF#(Bit#(8))) outputFIFO;
 } BlueCheck_Params;
 
 // Sub-parameters for iterative deepening
+
 typedef struct {
   // Iterative deepening requires ability to reset the circuit under test
   MakeResetIfc rst;
@@ -74,52 +63,79 @@ typedef struct {
   (function Bit#(32) f(Bit#(32) currentDepth)) incDepth;
 } ID_Params;
 
+// ============================================================================
+// States of the BlueCheck-generated checker
+// ============================================================================
+
 // The maximum number of states in the equivalance checker.
 // You will get a compile-time error message if this parameter
 // is not big enough, but it's not likely, unless you use very
 // large method frequencies.
+
 typedef 16 LogMaxStates;
-typedef UInt#(LogMaxStates) State;
+typedef Bit#(LogMaxStates) State;
 
 // The frequency that the checker will move to particular state.
-typedef Integer Frequency; // Range: 1 to 100.
 
-// Serialise / Deserialise counter-examples ===================================
+typedef Integer Freq;
 
-// When a counter-example is found in simulation, we can save it to a
-// file so that it can be replayed in isolation in a subsequent run
-// with debugging enabled.  This feature is not synthesisable, but
-// it's very handy in simulation.  Thanks to Jon Woodruff for this
-// suggestion.
+// ============================================================================
+// BlueCheck collection data type
+// ============================================================================
 
-// Serialise data of type t to a sequence of bytes and append to a file
-// (This definition is a bit obfusticated but it's the only way I
-// found that doesn't introduce an ugly type constraint)
-function Action putFile(File f, t data)
-  provisos ( Bits#(t, width)
-           , Div#(width, 8, nbytes) ) =
-  action
-    Bit#(TAdd#(width, 8)) block = zeroExtend(pack(data));
-    Vector#(nbytes, Bit#(8)) bytes =
-      unpack(block[valueOf(TMul#(nbytes, 8))-1:0]);
-    for (Integer i = 0; i < valueOf(nbytes); i=i+1)
-      $fwrite(f, "%c", bytes[i]);
-  endaction;
+// A BlueCheck module implicitly collects various items that allow
+// automatic creation of an equivalance checker.
 
-// De-serialise a sequence of bytes from a file and convert to data of type t
-function ActionValue#(t) getFile(File f)
-  provisos ( Bits#(t, width)
-           , Div#(width, 8, nbytes) ) =
-    actionvalue
-      Vector#(nbytes, Bit#(8)) bytes;
-      for (Integer i = 0; i < valueOf(nbytes); i=i+1) begin
-        int c <- $fgetc(f);
-        bytes[i] = pack(c)[7:0];
-      end
-      return unpack(pack(bytes)[valueOf(width)-1:0]);
-    endactionvalue;
+typedef ModuleCollect#(Item) BlueCheck;
 
-// For displaying function applications =======================================
+// BlueCheck modules collect items of the following type.
+
+typedef union tagged {
+  Tuple3#(Freq, App, Action) ActionItem;
+  Tuple3#(Freq, App, Stmt) StmtItem;
+  Tuple2#(Freq, List#(String)) ParItem;
+  Action GenItem;
+  List#(LFSR16) LFSRItem;
+  Tuple2#(Fmt, Bool) InvariantItem;
+  Tuple2#(Bool, Reg#(Bool)) EnsureItem;
+  Stmt PreStmtItem;
+  Stmt PostStmtItem;
+} Item;
+
+// Functions for extracting items.
+
+function List#(a) single(a x) = Cons(x, Nil);
+
+function List#(Tuple3#(Freq, App, Action)) getActionItem(Item item) =
+  item matches tagged ActionItem .x ? single(x) : Nil;
+
+function List#(Tuple3#(Freq, App, Stmt)) getStmtItem(Item item) =
+  item matches tagged StmtItem .x ? single(x) : Nil;
+
+function List#(Tuple2#(Freq, List#(String))) getParItem(Item item) =
+  item matches tagged ParItem .x ? single(x) : Nil;
+
+function List#(Action) getGenItem(Item item) =
+  item matches tagged GenItem .x ? single(x) : Nil;
+
+function List#(LFSR16) getLFSRItem(Item item) =
+  item matches tagged LFSRItem .xs ? xs : Nil;
+
+function List#(Tuple2#(Fmt, Bool)) getInvariantItem(Item item) =
+  item matches tagged InvariantItem .x ? single(x) : Nil;
+
+function List#(Tuple2#(Bool, Reg#(Bool))) getEnsureItem(Item item) =
+  item matches tagged EnsureItem .x ? single(x) : Nil;
+
+function List#(Stmt) getPreStmtItem(Item item) =
+  item matches tagged PreStmtItem .x ? single(x) : Nil;
+
+function List#(Stmt) getPostStmtItem(Item item) =
+  item matches tagged PostStmtItem .x ? single(x) : Nil;
+
+// ============================================================================
+// For displaying function applications
+// ============================================================================
 
 typedef struct {
   String name;
@@ -146,145 +162,274 @@ endfunction
 function App appendArg(App app, Fmt arg) =
   App { name: app.name, args: List::append(app.args, Cons(arg, Nil)) };
 
-// Functions for adding properties to the test bench ==========================
+// ============================================================================
+// Psuedo-random number generation
+// ============================================================================
 
-// A BlueCheck module implicitly collects actions, statements,
-// invariants, random generators and loggers, an allowing automatic
-// creation of an equivalance checker.
-typedef ModuleCollect#(Item) BlueCheck;
+// This is a slight variant of the standard 16-bit LFSR.  The
+// difference is that it mutates the seed when the period of the LFSR
+// has elapsed.  The aim is to avoid synchronising with other LFSRs
+// that may exist, which could lead to cycles.
 
-typedef union tagged {
-  Tuple3#(Frequency, App, Action) ActionItem;
-  Tuple3#(Frequency, App, Stmt) StmtItem;
-  Tuple2#(Bool, function Action gen(Bool replay)) RandomGenItem;
-  Tuple2#(Fmt, Bool) InvariantItem;
-  Tuple2#(Bool, Reg#(Bool)) EnsureItem;
-  Tuple3#(Action, Action, Action) LogItem;
-  (function Action save(File f)) SaveItem;
-  (function Action restore(File f)) RestoreItem;
-  Stmt PreStmtItem;
-  Stmt PostStmtItem;
-  Tuple2#(Frequency, List#(String)) ParallelItem;
-} Item;
+interface LFSR16;
+  method Action seed(Bit#(16) s);
+  method Action next;
+  method Bit#(16) value;
+  method Bit#(16) out;
+endinterface
 
-// Turn an item into a singleton action if it is an ActionItem.
-function List#(Tuple3#(Frequency, App, Action)) getActionItem(Item item) =
-  case (item) matches
-    tagged ActionItem .a: return Cons(a, Nil);
-    default: return Nil;
-  endcase;
+module mkLFSR16 (LFSR16);
+  // Create a standard 16-bit LFSR.
+  LFSR#(Bit#(16)) lfsr <- mkLFSR_16;
 
-// Turn an item into a singleton action if it is an RandomGenItem.
-function List#(Tuple2#(Bool, function Action gen(Bool replay)))
-  getRandomGenItem(Item item) =
-  case (item) matches
-    tagged RandomGenItem .a: return Cons(a, Nil);
-    default: return Nil;
-  endcase;
+  // Store the seed.
+  Reg#(Bit#(16)) seedReg <- mkReg(0);
 
-// Turn an item into a singleton pair if it is an InvariantItem.
-function List#(Tuple2#(Fmt, Bool)) getInvariantItem(Item item) =
-  case (item) matches
-    tagged InvariantItem .a: return Cons(a, Nil);
-    default: return Nil;
-  endcase;
+  // Has next() has been called at least once since the last call to seed()?
+  Reg#(Bool) running <- mkReg(False);
 
-// Turn an item into a singleton statement if it is an StmtItem.
-function List#(Tuple3#(Frequency, App, Stmt)) getStmtItem(Item item) =
-  case (item) matches
-    tagged StmtItem .a: return Cons(a, Nil);
-    default: return Nil;
-  endcase;
+  // Signals from the methods to the following rule
+  Wire#(Maybe#(Bit#(16))) seedWire <- mkDWire(Invalid);
+  PulseWire nextWire               <- mkPulseWire;
 
-// Turn an item into a singleton statement if it is an EnsureItem.
-function List#(Tuple2#(Bool, Reg#(Bool))) getEnsureItem(Item item) =
-  case (item) matches
-    tagged EnsureItem .a: return Cons(a, Nil);
-    default: return Nil;
-  endcase;
+  // The rule ('seed' takes priority over 'next')
+  rule step;
+    if (seedWire matches tagged Valid .s) begin
+      running <= False;
+      seedReg <= s;
+      lfsr.seed(s);
+    end
+    else if (nextWire) begin
+      running <= True;
+      if (running && seedReg == lfsr.value)
+        begin
+          // Period has elapsed!
+          let newSeed = seedReg+1;
+          lfsr.seed(newSeed);
+          seedReg <= newSeed;
+        end
+      else
+        lfsr.next;
+    end
+  endrule
 
-// Turn an item into a singleton statement if it is an LogItem.
-function List#(Tuple3#(Action, Action, Action))
-  getLogItem(Item item) =
-  case (item) matches
-    tagged LogItem .a: return Cons(a, Nil);
-    default: return Nil;
-  endcase;
+  // Set the value of the LFSR (must be non-zero)
+  method Action seed(Bit#(16) s);
+    seedWire <= tagged Valid s;
+  endmethod
 
-// Turn a save item into a singleton statement if it is a SaveItem.
-function List#(function Action save(File f)) getSaveItem(Item item) =
-  case (item) matches
-    tagged SaveItem .a: return Cons(a, Nil);
-    default: return Nil;
-  endcase;
+  // Output to use as psuedo-random number
+  method Bit#(16) out = ilvBits(lfsr.value[15:8], lfsr.value[7:0]);
 
-// Turn a save item into a singleton statement if it is a SaveItem.
-function List#(function Action restore(File f)) getRestoreItem(Item item) =
-  case (item) matches
-    tagged RestoreItem .a: return Cons(a, Nil);
-    default: return Nil;
-  endcase;
+  // Obtain the current value of the LFSR.
+  method Bit#(16) value = lfsr.value;
 
-// Turn an item into a singleton statement if it is a PreStmtItem.
-function List#(Stmt) getPreStmtItem(Item item) =
-  case (item) matches
-    tagged PreStmtItem .a: return Cons(a, Nil);
-    default: return Nil;
-  endcase;
+  // Update the LFSR with it's next value.
+  method Action next;
+    nextWire.send;
+  endmethod
+endmodule
 
-// Turn an item into a singleton statement if it is a PostStmtItem.
-function List#(Stmt) getPostStmtItem(Item item) =
-  case (item) matches
-    tagged PostStmtItem .a: return Cons(a, Nil);
-    default: return Nil;
-  endcase;
+// ============================================================================
+// Generators
+// ============================================================================
 
-// Turn an item into a singleton statement if it is a ParallelItem.
-function List#(Tuple2#(Frequency, List#(String)))
-    getParallelItem(Item item) =
-  case (item) matches
-    tagged ParallelItem .a: return Cons(a, Nil);
-    default: return Nil;
-  endcase;
+// Generate values of a given type.
 
-// The following type class allows two functions of the same type to
-// be applied to random inputs.  If the return values differ, the
-// behaviour is to terminate with an error message (a counter-example
-// has been found).  The probability that the equivalence will be
-// checked on any given step can be specified.
-typeclass Equiv#(type a);
-  module [BlueCheck] eq#(App app, Frequency fr, a f, a g) ();
+interface Gen#(type t);
+  method ActionValue#(t) gen;
+endinterface
+
+// The following standard generator works for any type in Bits and
+// Bounded, and uses LFSRs to give psuedo-random data.
+
+module [BlueCheck] mkGen (Gen#(t))
+  provisos ( Bits#(t, n)
+           , Bounded#(t)
+           , Add#(extra, n, TMul#(TDiv#(n, 16), 16)));
+  // Create as many 16-bit LFSRs as needed.
+  Vector#(TDiv#(n, 16), LFSR16) lfsr <- replicateM(mkLFSR16);
+
+  // Expose these LFSRs to BlueCheck (which will seed them).
+  addToCollection(tagged LFSRItem (toList(lfsr)));
+
+  // Generate a value using the LFSRs.
+  method ActionValue#(t) gen;
+    Vector#(TDiv#(n, 16), Bit#(16)) x;
+    for (Integer i = 0; i < valueOf(TDiv#(n, 16)); i=i+1) begin
+      lfsr[i].next;
+      x[i] = lfsr[i].out;
+    end
+    return unpack(truncate(pack(x)));
+  endmethod
+endmodule
+
+// ============================================================================
+// Arbitrary class
+// ============================================================================
+
+// The Arbitrary class defines a generator for each type.
+
+typeclass Arbitrary#(type t);
+  module [BlueCheck] arbitrary (Gen#(t));
 endtypeclass
 
-module [BlueCheck] equiv#(String name, a f, a g) ()
-    provisos(Equiv#(a));
-  App app = App { name: name, args: Nil};
-  eq(app, 1, f, g);
-endmodule
+// By default, i.e. if no more specific instance exists for a given
+// type, we use the mkGen module defined above.
 
-module [BlueCheck] equivf#(Frequency fr, String name, a f, a g) ()
-    provisos(Equiv#(a));
-  App app = App { name: name, args: Nil};
-  eq(app, fr, f, g);
-endmodule
+instance Arbitrary#(t)
+  provisos ( Bits#(t, n)
+           , Bounded#(t)
+           , Add#(extra, n, TMul#(TDiv#(n, 16), 16)));
 
-// Base case 1: execute two actions.
-instance Equiv#(Action);
-  module [BlueCheck] eq#(App app, Frequency fr, Action a, Action b) ();
-    Action executeTwo =
-      action
-        a; b;
-      endaction;
-    addToCollection(tagged ActionItem
-      (tuple3(fr, app, executeTwo)));
+  module [BlueCheck] arbitrary (Gen#(t));
+    let gen <- mkGen;
+    return gen;
   endmodule
 endinstance
 
-// Base case 2: execute two action-values,
-// and check equivalance of results.
+// ============================================================================
+// Adding properties
+// ============================================================================
+
+// Add a property to be checked.
+
+typeclass Prop#(type a);
+  module [BlueCheck] addProp#(Freq fr, App app, a f) ();
+endtypeclass
+
+// Short-hand for a unit frequency.
+
+module [BlueCheck] prop#(String name, a f) ()
+    provisos(Prop#(a));
+  addProp(1, App { name: name, args: Nil}, f);
+endmodule
+
+// Short-hand for a specified frequency.
+
+module [BlueCheck] propf#(Freq freq, String name, a f) ()
+    provisos(Prop#(a));
+  addProp(freq, App { name: name, args: Nil}, f);
+endmodule
+
+// Base case 1: an action.
+
+instance Prop#(Action);
+  module [BlueCheck] addProp#(Freq freq, App app, Action a) ();
+    addToCollection(tagged ActionItem (tuple3(freq, app, a)));
+  endmodule
+endinstance
+
+// Base case 2: a statement.
+
+instance Prop#(Stmt);
+  module [BlueCheck] addProp#(Freq freq, App app, Stmt s) ();
+    addToCollection(tagged StmtItem (tuple3(freq, app, s)));
+  endmodule
+endinstance
+
+// Base case 3: a boolean.
+
+instance Prop#(Bool);
+  module [BlueCheck] addProp#(Freq freq, App app, Bool b) ();
+    Fmt msg = $format(formatApp(app), "\nProperty failed");
+    addToCollection(tagged InvariantItem (tuple2(msg, b)));
+  endmodule
+endinstance
+
+// Base case 4: an action-value returning a boolean.
+
+instance Prop#(ActionValue#(Bool));
+  module [BlueCheck] addProp#(Freq freq, App app, ActionValue#(Bool) a) ();
+    Wire#(Bool) success <- mkDWire(True);
+    Fmt msg = $format("Property failed");
+
+    Action act =
+      action
+        Bool s <- a;
+        if (!s) success <= False;
+      endaction;
+
+    addToCollection(tagged ActionItem (tuple3(freq, app, act)));
+    addToCollection(tagged InvariantItem (tuple2(msg, success)));
+  endmodule
+endinstance
+
+// Base case 5: an action-value returning some other type
+
+instance Prop#(ActionValue#(t));
+  module [BlueCheck] addProp#(Freq freq, App app, ActionValue#(t) a) ();
+    Action act = action t s <- a; endaction;
+    addToCollection(tagged ActionItem (tuple3(freq, app, act)));
+  endmodule
+endinstance
+
+// Recursive case: generate input.
+
+instance Prop#(function b f(a x))
+  provisos(Prop#(b), Bits#(a, n), Arbitrary#(a), FShow#(a));
+    module [BlueCheck] addProp#(Freq freq, App app, function b f(a x))();
+      Reg#(a) aReg    <- mkRegU;
+      Gen#(a) aRandom <- arbitrary;
+
+      Action genRandom =
+        action
+          let a <- aRandom.gen;
+          aReg <= a;
+        endaction;
+      
+      addToCollection(tagged GenItem genRandom);
+      addProp(freq, appendArg(app, fshow(aReg)), f(aReg));
+    endmodule
+endinstance
+
+// ============================================================================
+// Adding equivalences
+// ============================================================================
+
+// Add an equivalence to be checked.
+
+typeclass Equiv#(type a);
+  module [BlueCheck] addEquiv#(Freq freq, App app, a f, a g) ();
+endtypeclass
+
+// Short-hand for a unit frequency.
+
+module [BlueCheck] equiv#(String name, a f, a g) ()
+    provisos(Equiv#(a));
+  addEquiv(1, App { name: name, args: Nil}, f, g);
+endmodule
+
+// Short-hand for a specified frequency.
+
+module [BlueCheck] equivf#(Freq freq, String name, a f, a g) ()
+    provisos(Equiv#(a));
+  addEquiv(freq, App { name: name, args: Nil}, f, g);
+endmodule
+
+// Base case 1: two actions.
+
+instance Equiv#(Action);
+  module [BlueCheck] addEquiv#(Freq fr, App app, Action a, Action b) ();
+    Action both = action a; b; endaction;
+    addToCollection(tagged ActionItem (tuple3(fr, app, both)));
+  endmodule
+endinstance
+
+// Base case 2: two statements.
+
+instance Equiv#(Stmt);
+  module [BlueCheck] addEquiv#(Freq fr, App app, Stmt a, Stmt b) ();
+    Stmt s = par a; b; endpar;
+    addToCollection(tagged StmtItem (tuple3(fr, app, s)));
+  endmodule
+endinstance
+
+// Base case 3: two action-values
+
 instance Equiv#(ActionValue#(t))
   provisos(Eq#(t), Bits#(t, n), FShow#(t));
-  module [BlueCheck] eq#(App app, Frequency fr
+  module [BlueCheck] addEquiv#(Freq fr, App app
                                 , ActionValue#(t) a
                                 , ActionValue#(t) b) ();
     Wire#(Bool) success <- mkDWire(True);
@@ -293,70 +438,43 @@ instance Equiv#(ActionValue#(t))
     Fmt msg             =  fshow("Not equal: ") + fshow(aWire)
                         +  fshow(" versus ")    + fshow(bWire);
 
-    Action executeTwoAndCheck =
+    Action check =
       action
         t aVal <- a; aWire <= aVal;
         t bVal <- b; bWire <= bVal;
         if (aVal != bVal) success <= False;
       endaction;
-      addToCollection(tagged ActionItem
-        (tuple3(fr, app, executeTwoAndCheck)));
-      addToCollection(tagged InvariantItem (tuple2(msg, success)));
+
+    addToCollection(tagged ActionItem (tuple3(fr, app, check)));
+    addToCollection(tagged InvariantItem (tuple2(msg, success)));
   endmodule
 endinstance
 
-// Base case 3: execute two statements.
-instance Equiv#(Stmt);
-  module [BlueCheck] eq#(App app, Frequency fr, Stmt a, Stmt b) ();
-    Stmt s = par a; b; endpar;
-    addToCollection(tagged StmtItem (tuple3(fr, app, s)));
-  endmodule
-endinstance
+// Recursive case: generate input
 
-// Recursive case: generate a random input,
-// apply it to each function, and
-// recurse on the resulting applications.
 instance Equiv#(function b f(a x))
-  provisos(Equiv#(b), Bits#(a, n), Bounded#(a), FShow#(a));
-    module [BlueCheck] eq#(App app, Frequency fr
-                                  , function b f(a x)
-                                  , function b g(a y))();
-      Reg#(Bool) init <- mkReg(True);
-      Reg#(a) aReg <- mkRegU;
-      Randomize#(a) aRandom <- mkGenericRandomizer;
-      FIFOF#(a) aLog <- mkUGSizedFIFOF(logSize);
+  provisos(Equiv#(b), Bits#(a, n), Arbitrary#(a), FShow#(a));
+    module [BlueCheck] addEquiv#(Freq freq, App app
+                                          , function b f(a x)
+                                          , function b g(a y)) ();
+      Reg#(a) aReg    <- mkRegU;
+      Gen#(a) aRandom <- arbitrary;
 
-      function Action genRandom(Bool replay) =
+      Action genRandom =
         action
-          let a <- aRandom.next;
-          aReg <= replay ? aLog.first : a;
+          let a <- aRandom.gen;
+          aReg <= a;
         endaction;
-
-      rule initialise (init);
-        aRandom.cntrl.init;
-        init <= False;
-      endrule
-
-      Action logEnq   = aLog.enq(aReg);
-      Action logRot   = action aLog.deq; aLog.enq(aLog.first); endaction;
-      Action logClear = aLog.clear;
-
-      function save(file) = putFile(file, aLog.first);
-      function restore(file) =
-        action let x <- getFile(file); aLog.enq(x); endaction;
-
-      addToCollection(tagged RandomGenItem (tuple2(!init, genRandom)));
-      addToCollection(tagged LogItem (tuple3(logEnq, logRot, logClear)));
-      addToCollection(tagged SaveItem save);
-      addToCollection(tagged RestoreItem restore);
-
-      eq(appendArg(app, fshow(aReg)), fr, f(aReg), g(aReg));
+      
+      addToCollection(tagged GenItem genRandom);
+      addEquiv(freq, appendArg(app, fshow(aReg)), f(aReg), g(aReg));
     endmodule
 endinstance
 
-// Base case 4 (fall through): check that two values are equal.
+// Base case 4 (fall through): check that two values are equal
+
 instance Equiv#(a) provisos(Eq#(a), FShow#(a));
-  module [BlueCheck] eq#(App app, Frequency fr, a x, a y) ();
+  module [BlueCheck] addEquiv#(Freq fr, App app, a x, a y) ();
     Wire#(Bool) success <- mkDWire(True);
     Fmt fmt = formatApp(app) + fshow(" failed: ")
             + fshow(x) + fshow(" v ") + fshow(y);
@@ -369,94 +487,16 @@ instance Equiv#(a) provisos(Eq#(a), FShow#(a));
   endmodule
 endinstance
 
-// Like the Equiv type-class, except for a single method.
-typeclass Prop#(type a);
-  module [BlueCheck] pr#(App app, Frequency fr, a f) ();
-endtypeclass
+// ============================================================================
+// Assertions
+// ============================================================================
 
-// Base case 1: execute statement.
-instance Prop#(Stmt);
-  module [BlueCheck] pr#(App app, Frequency fr, Stmt a) ();
-    addToCollection(tagged StmtItem (tuple3(fr, app, a)));
-  endmodule
-endinstance
+// 'ensure' functions allow assertions to be made inside actions or
+// statements of properties or equivalences.
 
-// Base case 2: execute action.
-instance Prop#(Action);
-  module [BlueCheck] pr#(App app, Frequency fr, Action a) ();
-    addToCollection(tagged ActionItem (tuple3(fr, app, a)));
-  endmodule
-endinstance
+// Obtain a function to make assertions with.
 
-// Base case 3: execute action-value
-instance Prop#(ActionValue#(Bool));
-  module [BlueCheck] pr#(App app,Frequency fr,ActionValue#(Bool) a) ();
-    Wire#(Bool) success <- mkDWire(True);
-    Fmt msg = fshow("Property failed");
-
-    Action act =
-      action
-        Bool s <- a;
-        if (!s) success <= False;
-      endaction;
-      addToCollection(tagged ActionItem (tuple3(fr, app, act)));
-      addToCollection(tagged InvariantItem (tuple2(msg, success)));
-  endmodule
-endinstance
-
-// Recursive case.
-instance Prop#(function b f(a x))
-  provisos(Prop#(b), Bits#(a, n), Bounded#(a), FShow#(a));
-    module [BlueCheck] pr#(App app, Frequency fr, function b f(a x))();
-      Reg#(Bool) init <- mkReg(True);
-      Reg#(a) aReg <- mkRegU;
-      Randomize#(a) aRandom <- mkGenericRandomizer;
-      FIFOF#(a) aLog <- mkUGSizedFIFOF(logSize);
-
-      function Action genRandom(Bool replay) =
-        action
-          let a <- aRandom.next;
-          aReg <= replay ? aLog.first : a;
-        endaction;
-
-      rule initialise (init);
-        aRandom.cntrl.init;
-        init <= False;
-      endrule
-
-      Action logEnq   = aLog.enq(aReg);
-      Action logRot   = action aLog.deq; aLog.enq(aLog.first); endaction;
-      Action logClear = aLog.clear;
-
-      function save(file) = putFile(file, aLog.first);
-      function restore(file) =
-        action let x <- getFile(file); aLog.enq(x); endaction;
-
-
-      addToCollection(tagged RandomGenItem (tuple2(!init, genRandom)));
-      addToCollection(tagged LogItem (tuple3(logEnq, logRot, logClear)));
-      addToCollection(tagged SaveItem save);
-      addToCollection(tagged RestoreItem restore);
-
-      pr(appendArg(app, fshow(aReg)), fr, f(aReg));
-    endmodule
-endinstance
-
-module [BlueCheck] prop#(String name, a f) ()
-    provisos(Prop#(a));
-  App app = App { name: name, args: Nil};
-  pr(app, 1, f);
-endmodule
-
-module [BlueCheck] propf#(Frequency fr, String name, a f) ()
-    provisos(Prop#(a));
-  App app = App { name: name, args: Nil};
-  pr(app, fr, f);
-endmodule
-
-// Ensure function -- for making assertions inside properties
 typedef (function Action f(Bool cond)) Ensure;
-typedef (function Action f(Bool cond, Fmt msg)) EnsureMsg;
 
 module [BlueCheck] getEnsure (Ensure);
   // Create ensure function
@@ -466,6 +506,11 @@ module [BlueCheck] getEnsure (Ensure);
   addToCollection(tagged EnsureItem (tuple2(ok, showMsg)));
   return ensureFunc;
 endmodule
+
+// Similar to above, but the assertion function also takes a message
+// to be displayed if the assertion fails.
+
+typedef (function Action f(Bool cond, Fmt msg)) EnsureMsg;
 
 module [BlueCheck] getEnsureMsg (EnsureMsg);
   // Create ensure function
@@ -477,7 +522,12 @@ module [BlueCheck] getEnsureMsg (EnsureMsg);
   return ensureFunc;
 endmodule
 
-function Action assignReg(t x, Reg#(t) r) = action r <= x; endaction;
+// ============================================================================
+// Pre and post statements
+// ============================================================================
+
+// Allow user to add custom pre/post statements for each test
+// sequence that is generated.
 
 // Allow user to add custom pre/post statements for each test
 module [BlueCheck] addPreStmt#(Stmt pre) (Empty);
@@ -488,17 +538,23 @@ module [BlueCheck] addPostStmt#(Stmt post) (Empty);
   addToCollection(tagged PostStmtItem post);
 endmodule
 
-// "Parallel" assertions ======================================================
+// ============================================================================
+// Parallel properties
+// ============================================================================
 
-// Assert that a list of equivalences/properties can run in parallel.
+// Specify that a list of equivalences/properties can run in parallel.
 
 module [BlueCheck] parallel#(List#(String) names) (Empty);
-  addToCollection(tagged ParallelItem (tuple2(1, names)));
+  addToCollection(tagged ParItem (tuple2(1, names)));
 endmodule
 
-module [BlueCheck] parallelf#(Frequency fr, List#(String) names) (Empty);
-  addToCollection(tagged ParallelItem (tuple2(fr, names)));
+module [BlueCheck] parallelf#(Freq fr, List#(String) names) (Empty);
+  addToCollection(tagged ParItem (tuple2(fr, names)));
 endmodule
+
+// ============================================================================
+// Friendly list construction
+// ============================================================================
 
 // The following type-class allows convenient construction of lists, e.g.
 //
@@ -520,19 +576,190 @@ function b list() provisos (MkList#(b, a));
   return mkList(Nil);
 endfunction
 
+// ============================================================================
+// Misc functions
+// ============================================================================
+
 // Is a list empty?
+
 function Bool isEmpty(List#(a) xs);
   if (xs matches tagged Nil) return True; else return False;
 endfunction
 
+// Function for assigning a value to a register.
+
+function Action assignReg(t x, Reg#(t) r) = action r <= x; endaction;
+
+// Function to sum a list.
+
+function Integer sum(List#(Integer) xs);
+  if (xs matches tagged Nil) return 0;
+  else return (List::head(xs) + sum(List::tail(xs)));
+endfunction
+
+// Sequence a list of statements.
+
+function Stmt seqList(List#(Stmt) xs);
+  if (xs matches tagged Nil) return (seq delay(1); endseq);
+  else return (seq List::head(xs); seqList(List::tail(xs)); endseq);
+endfunction
+
+// Interleave bits
+
+function Bit#(m) ilvBits(Bit#(n) x, Bit#(n) y) provisos (Add#(n, n, m));
+  Bit#(m) z;
+  for (Integer i = 0; i < valueOf(m); i=i+1)
+    z[i] = (i%2) == 0 ? x[i/2] : y[i/2];
+  return z;
+endfunction
+
+// ============================================================================
+// ASCII encoding/decoding
+// ============================================================================
+
+// For transferring data over the UART, we encode each 4-bit nibble as
+// a ASCII hex digit.
+
+function Bit#(8) hexEncode(Bit#(4) x);
+  Bit#(8) y = x <= 9 ? 48 : 55;
+  return y+extend(x);
+endfunction
+
+function Bit#(4) hexDecode(Bit#(8) x);
+  Bit#(8) y = x >= 65 ? 55 : 48;
+  return (x-y)[3:0];
+endfunction
+
+// ============================================================================
+// Loading and storing seeds
+// ============================================================================
+
+// When a counter-example is found in simulation, we can save the
+// seeds of all LFSRs to a file or UART so that it can be replayed.
+// Thanks to Jon Woodruff for this suggestion.
+
+function Action putSeed(File f, Bit#(16) data) =
+  action
+    $fwrite(f, "%c", hexEncode(data[15:12]));
+    $fwrite(f, "%c", hexEncode(data[11:8]));
+    $fwrite(f, "%c", hexEncode(data[7:4]));
+    $fwrite(f, "%c", hexEncode(data[3:0]));
+  endaction;
+
+function ActionValue#(Bit#(16)) getSeed(File f) =
+  actionvalue
+    Bit#(16) x;
+    int c0 <- $fgetc(f);
+    int c1 <- $fgetc(f);
+    int c2 <- $fgetc(f);
+    int c3 <- $fgetc(f);
+    x[15:12] = hexDecode(pack(c0)[7:0]);
+    x[11:8]  = hexDecode(pack(c1)[7:0]);
+    x[7:4]   = hexDecode(pack(c2)[7:0]);
+    x[3:0]   = hexDecode(pack(c3)[7:0]);
+    return x;
+  endactionvalue;
+
+// The filename used to store a counter-example on the filesystem.
+
+String filename = "State.txt";
+
+// ============================================================================
+// Rotating Queue
+// ============================================================================
+
+// Each LFSR has a 'shadow register'.  These shadow registers can be
+// used to save or restore the state of all the LFSRs.  Since we want
+// to be able to easily serialise this state, for transfer to a file
+// or over a UART, we using the following rotating queue structure.
+
+// A rotating queue is a list of registers with support for:
+//   * inserting (by rotation) an element at one end
+//   * reading (by rotation) an element from the other end
+//   * loading and storing the values of all the registers
+
+interface RotatingQueue#(type t);
+  method Action put(t in);
+  method ActionValue#(t) get;
+  method List#(t) load;
+  method Action store(List#(t) inputs);
+endinterface
+
+module [Module] mkRotatingQueue#(Integer size) (RotatingQueue#(t))
+                  provisos (Bits#(t, n));
+
+  // Registers
+  // ---------
+
+  List#(Reg#(t)) regs <- List::replicateM(size, mkRegU);
+
+  // Wires
+  // -----
+
+  Wire#(Bool)        rotWire  <- mkDWire(False);
+  Wire#(Maybe#(t))   putWire  <- mkDWire(Invalid);
+  Wire#(Bool)        loadWire <- mkDWire(False);
+  List#(Wire#(t))    loadVals <- List::replicateM(size, mkDWire(?));
+
+  // Rules
+  // -----
+
+  rule rotate (rotWire || loadWire);
+    t insert;
+    if (putWire matches tagged Valid .x)
+      insert = x;
+    else
+      insert = readReg(List::last(regs));
+
+    List#(Reg#(t))  rs = regs;
+    List#(Wire#(t)) vs = loadVals;
+    for (Integer i = 0; i < size; i=i+1) begin
+      if (loadWire)
+        rs[0] <= vs[0];
+      else
+        rs[0] <= insert;
+      insert = rs[0];
+      rs     = List::tail(rs);
+      vs     = List::tail(vs);
+    end
+  endrule
+
+  // Methods
+  // -------
+
+  method Action put(t x);
+    putWire <= tagged Valid x;
+    rotWire <= True;
+  endmethod
+
+  method ActionValue#(t) get;
+    rotWire <= True;
+    return readReg(List::last(regs));
+  endmethod
+
+  method List#(t) load = List::map(readReg, regs);
+
+  method Action store(List#(t) inputs);
+    function Action f(Wire#(t) w, t x) = action w <= x; endaction;
+    let _ <- List::zipWithM(f, loadVals, inputs);
+    loadWire <= True;
+  endmethod
+
+endmodule
+
+// ============================================================================
+// State conditions
+// ============================================================================
+
 // Compute the condition for being in each state of the equivalance
 // checker. Some states are visited more frequently than others.
+
 function List#(Bool) stateConds(Reg#(State) s, Integer start,
-                                         List#(Frequency) freqs);
+                                         List#(Freq) freqs);
   if (freqs matches tagged Nil) return Nil;
   else
     begin
-      Frequency f = List::head(freqs);
+      Freq f = List::head(freqs);
       Bool cond;
       if (f == 1) cond = s == fromInteger(start);
       else cond = s >= fromInteger(start) && s < fromInteger(start+f);
@@ -540,9 +767,11 @@ function List#(Bool) stateConds(Reg#(State) s, Integer start,
     end
 endfunction
 
-// With the presence of 'parallel' assertions, it is possible to
-// be in multiple states at the same time.  The following function
-// will update the 'inState' mapping using the 'parallel' lists.
+// With the presence of 'parallel' statements, it is possible to be in
+// multiple states at the same time, i.e. multiple properties are
+// being checked on the same cycle.  The following function will
+// update the 'inState' mapping using the 'parallel' lists.
+
 function List#(Bool) mergeConds
   ( List#(Bool) inState
   , List#(String) stateNames
@@ -575,31 +804,105 @@ function List#(Bool) mergeConds
   end
 endfunction
 
-// List utilities =============================================================
+// ============================================================================
+// Bounding psuedo-random numbers
+// ============================================================================
 
-// Sum a list
-function Integer sum(List#(Integer) xs);
-  if (xs matches tagged Nil) return 0;
-  else return (List::head(xs) + sum(List::tail(xs)));
+// Bound a given number using the specified maximum value 'm'.  This
+// function is cheaper to compute that modulus divide, but has a worse
+// distribution: after bounding, some values are two times more likely
+// to appear than others.
+
+function Bit#(n) bound(Bit#(n) x, Integer m);
+  Integer top = 2 ** log2(m+1);
+  let y = x & fromInteger(top-1);
+  return (y > fromInteger(m) ? y - fromInteger(m+1) : y);
 endfunction
 
-// Average
-function Integer average(List#(Integer) xs) =
-  div(sum(xs), length(xs));
+// ============================================================================
+// Max sequence length
+// ============================================================================
 
-// Sequence a list of statements
-function Stmt seqList(List#(Stmt) xs);
-  if (xs matches tagged Nil) return (seq delay(1); endseq);
-  else return (seq List::head(xs); seqList(List::tail(xs)); endseq);
-endfunction
+// When shrinking is enabled, the length of the sequences generated
+// must be bounded.
 
-// Construct checker ==========================================================
+Integer maxSeqLen = 64;
+
+// ============================================================================
+// Communication from FPGA to host PC
+// ============================================================================
+
+// For communication from FPGA to host PC, we use an Avalon
+// memory-mapped interface to Altera's JTAG UART.  This section of
+// code is specific to Altera FPGAs, but should be easy to port to
+// other devices.
+
+interface JtagUart;
+  (* always_ready *)
+  method Bit#(3)  uart_address;
+  (* always_ready *)
+  method Bit#(32) uart_writedata;
+  (* always_ready *)
+  method Bool uart_write;
+  (* always_ready *)
+  method Bool uart_read;
+  (* always_enabled *)
+  method Action uart(Bool uart_waitrequest,
+                     Bit#(32) uart_readdata);
+endinterface
+
+// Given a FIFO of bytes to send to the host PC, return an interface
+// to Altera's JTAG UART.
+
+module mkJtagUart#(FIFOF#(Bit#(8)) fifo) (JtagUart);
+  Reg#(Bool) reading <- mkReg(True);
+  method Bit#(3)  uart_address   = reading ? 4 : 0;
+  method Bit#(32) uart_writedata = extend(fifo.first);
+  method Bool     uart_write     = !reading && fifo.notEmpty;
+  method Bool     uart_read      = reading;
+  method Action   uart(Bool     uart_waitrequest,
+                       Bit#(32) uart_readdata);
+    if (reading) begin
+      if (!uart_waitrequest)
+        if (uart_readdata[31:16] > 0) reading <= False;
+    end else
+      if (!uart_waitrequest && fifo.notEmpty) begin
+        fifo.deq;
+        reading <= True;
+      end
+  endmethod
+endmodule
+
+// ============================================================================
+// Construct model checker
+// ============================================================================
 
 // Turn the list of items gathered in a BlueCheck module into an
-// actual equivalence checker.
-module [Module] blueCheckCore#( BlueCheck#(Empty) bc
-                              , BlueCheck_Params params ) (Stmt);
-  // Extract items.
+// actual model checker.
+
+module [Module] mkModelChecker#( BlueCheck#(Empty) bc
+                               , BlueCheck_Params params ) (Stmt);
+
+  // Read any flags from the command-line
+  // ------------------------------------
+
+  // Resume testing from a point specified by a file of LFSR seeds
+  Reg#(Bool) resumeFlag <- mkReg(False);
+  Reg#(Bool) resumed    <- mkReg(False);
+
+  // True once command-line args have been read
+  Reg#(Bool) gotPlusArgs <- mkReg(False);
+
+  rule readPlusArgs (!gotPlusArgs);
+    let b0 <- $test$plusargs("replay"); // For backwards-compatibility
+    let b1 <- $test$plusargs("resume");
+    resumeFlag  <= b0 || b1;
+    gotPlusArgs <= True;
+  endrule
+
+  // Extract items from BlueCheck collection
+  // ---------------------------------------
+
   let concat = List::concat;
   let map    = List::map;
   let append = List::append;
@@ -607,14 +910,12 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   let {_, items} <- getCollection(bc);
   let actionItems    = concat(map(getActionItem, items));
   let stmtItems      = concat(map(getStmtItem, items));
-  let randomGens     = concat(map(getRandomGenItem, items));
-  let logItems       = concat(map(getLogItem, items));
+  let randomGens     = concat(map(getGenItem, items));
   let ensureItems    = concat(map(getEnsureItem, items));
   let invariantBools = concat(map(getInvariantItem, items));
   let preStmt        = seqList(concat(map(getPreStmtItem, items)));
   let postStmt       = seqList(concat(map(getPostStmtItem, items)));
-  let saveFuncs      = concat(map(getSaveItem, items));
-  let restoreFuncs   = concat(map(getRestoreItem, items));
+  let lfsrItems      = concat(map(getLFSRItem, items));
   let actionApps     = map(tpl_2, actionItems);
   let stmtApps       = map(tpl_2, stmtItems);
   let actionMsgs     = map(formatApp, actionApps);
@@ -627,39 +928,42 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
   let stmtNames      = map(getName, stmtApps);
   let actionFreqs    = map(tpl_1, actionItems);
   let stmtFreqs      = map(tpl_1, stmtItems);
-  let parItems       = concat(map(getParallelItem, items));
+  let parItems       = concat(map(getParItem, items));
   let parFreqs       = map(tpl_1, parItems);
   let parLists       = map(tpl_2, parItems);
 
-  // Setup state machine for equivalence checking.
-  // Note state 0 is a no-op state.
-  List#(Integer) freqs = append(actionFreqs, stmtFreqs);
-  List#(Integer) allFreqs = append(freqs, parFreqs);
-  Integer sumFreqs = sum(freqs);
-  Integer numStates = 1+sumFreqs+sum(parFreqs);
-  Randomize#(State) randomState <-
-    mkConstrainedRandomizer(0, fromInteger(numStates-1));
-  ConfigReg#(State) state <- mkConfigReg(0);
-  PulseWire waitWire <- mkPulseWireOR;
-  PulseWire didFire <- mkPulseWireOR;
-  Reg#(Bool) testDone <- mkReg(False);
-  Reg#(Bool) doneUI <- mkReg(False);
-  List#(Bool) inStateSeq = stateConds(state, 1, freqs);
-  List#(Bool) inStatePar = stateConds(state, 1+sumFreqs, parFreqs);
-  List#(Bool) inState = mergeConds(inStateSeq,
-                                   append(actionNames, stmtNames),
-                                   inStatePar, parLists);
-  Reg#(Bool) shrinkingMode <- mkReg(False);
-  Reg#(Bool) verbose <- mkReg(params.verbose);
+  // State machine for equivalence checking
+  // (Note: state 0 is a no-op state)
+  // --------------------------------------
 
-  // When all random generators have initialised
-  Reg#(Bool) randGensInitialised <- mkReg(False);
+  List#(Integer) freqs    =  append(actionFreqs, stmtFreqs);
+  List#(Integer) allFreqs =  append(freqs, parFreqs);
+  Integer sumFreqs        =  sum(freqs);
+  Integer numStates       =  1+sumFreqs+sum(parFreqs);
+  LFSR16 stateGen         <- mkLFSR16;
+  List#(LFSR16) lfsrs     =  Cons(stateGen, lfsrItems);
+  Integer numLFSRs        =  List::length(lfsrs);
+  ConfigReg#(State) state <- mkConfigReg(0);
+  PulseWire waitWire      <- mkPulseWireOR;
+  PulseWire didFire       <- mkPulseWireOR;
+  Reg#(Bool) testDone     <- mkReg(False);
+  List#(Bool) inStateSeq  =  stateConds(state, 1, freqs);
+  List#(Bool) inStatePar  =  stateConds(state, 1+sumFreqs, parFreqs);
+  List#(Bool) inState     =  mergeConds(inStateSeq,
+                               append(actionNames, stmtNames),
+                               inStatePar, parLists);
+  Reg#(Bool) verbose      <- mkReg(params.verbose);
+  Reg#(File) seedFile     <- mkReg(InvalidFile);
 
   // When count is 0, actions/statements are disabled
+  // ------------------------------------------------
+
   ConfigReg#(Bit#(32)) count <- mkConfigReg(0);
   Bool actionsEnabled = count != 0;
 
   // When delayed count is 0, invariant checking is disabled
+  // -------------------------------------------------------
+
   ConfigReg#(Bit#(32)) delayedCount <- mkConfigReg(0);
   Bool checkingEnabled = delayedCount != 0;
 
@@ -667,26 +971,19 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
     delayedCount <= count;
   endrule
 
-  // Log/replay signals
-  FIFOF#(State) stateLog  <- mkSizedFIFOF(logSize);
-  FIFOF#(Bit#(64)) timeLog <- mkSizedFIFOF(logSize);
-  Wire#(Bool) replayWire <- mkDWire(False);
-  PulseWire logEnqWire <- mkPulseWireOR;
-  Wire#(Bool) logRotWire <- mkDWire(False);
-  Wire#(Bool) logClearWire <- mkDWire(False);
-  Reg#(Bit#(32)) counterExampleLength <- mkReg(0);
-  Reg#(Bit#(32)) omitNum <- mkReg(0);
-  Vector#(LogSize, Reg#(Bool)) omitMask <- replicateM(mkReg(False));
-  Reg#(File) logFile <- mkReg(InvalidFile);
+  // Keep track of failures
+  // ----------------------
 
-  // Track failures
   Reg#(Bool) failureReg    <- mkConfigReg(False);
   Wire#(Bool) resetFailure <- mkDWire(False);
-  Bool ensureFailure    = List::any( \== (False), ensureBools);
-  Bool invariantFailure = (waitWire || !checkingEnabled) ? False
-                        : List::any( \== (False), map (tpl_2, invariantBools));
-  Bool failureFound     = ensureFailure || invariantFailure || failureReg;
-
+  Bool ensureFailure       =  List::any( \== (False), ensureBools);
+  Bool invariantFailure    = (waitWire || !checkingEnabled) ? False
+                           : List::any( \== (False),
+                                        map (tpl_2, invariantBools));
+  Bool failureFound        = ensureFailure
+                          || invariantFailure
+                          || failureReg;
+  
   rule trackFailure;
     if (resetFailure)
       failureReg <= False;
@@ -694,8 +991,10 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       failureReg <= True;
   endrule
 
-  // Local timer
-  Reg#(Bit#(64)) timer <- mkReg(0);
+  // Timer
+  // -----
+
+  Reg#(Bit#(32)) timer <- mkReg(0);
   Wire#(Bool) resetTimer <- mkDWire(False);
 
   rule incTimer;
@@ -705,29 +1004,43 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       timer <= timer+1;
   endrule
 
-  // Generate rules to generate random data.
-  for (Integer i = 0; i < length(randomGens); i=i+1)
+  // Seed the random generators
+  // --------------------------
+
+  Reg#(Bool) seeded <- mkReg(False);
+
+  rule seedLFSRs (!seeded);
+    for (Integer i = 0; i < numLFSRs; i=i+1)
+      lfsrs[i].seed(fromInteger(((i**3) % 65535) + 1));
+    seeded <= True;
+  endrule
+
+  // Generate rules to generate random data
+  // --------------------------------------
+
+  PulseWire saveLFSRs     <- mkPulseWire;
+  PulseWire restoreLFSRs  <- mkPulseWire;
+
+  Integer numRandomGens = length(randomGens);
+  for (Integer i = 0; i < numRandomGens; i=i+1)
     begin
-      let go  = tpl_1(randomGens[i]);
-      let gen = tpl_2(randomGens[i]);
-      rule genRandomData (go && !waitWire);
-        gen(replayWire);
+      rule genRandomData (seeded && !waitWire && !restoreLFSRs && !saveLFSRs);
+        randomGens[i];
       endrule
     end
 
-  // Signal when all random generators have initialised
-  rule initRandomGens;
-    randGensInitialised <= List::all(tpl_1, randomGens);
-  endrule
+  // Rule to check 'ensure' assertions
+  // ---------------------------------
 
-  // Rules to check 'ensure' assertions.
   rule checkEnsure (!failureReg && List::any( \== (False) , ensureBools));
-    if (verbose)
-      $display("%0t: 'ensure' statement failed", timer);
+    if (verbose) $display("%0t: 'ensure' statement failed", timer);
   endrule
 
-  // Generate rules to check invariant booleans.
-  for (Integer i = 0; i < length(invariantBools); i=i+1)
+  // Generate rules to check invariants
+  // ----------------------------------
+
+  Integer numInvBools = length(invariantBools);
+  for (Integer i = 0; i < numInvBools; i=i+1)
     begin
       let msg = tpl_1(invariantBools[i]);
       let b   = tpl_2(invariantBools[i]);
@@ -736,15 +1049,16 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       endrule
     end
 
-  // Generate rules to run actions, guarded by the current state.
-  for (Integer i = 0; i < length(actions); i=i+1)
+  // Generate rules to run actions, guarded by the current state
+  // -----------------------------------------------------------
+
+  Integer numActions = length(actions);
+  for (Integer i = 0; i < numActions; i=i+1)
     begin
       (* preempts = "runAction, runActionNotPossible" *)
       rule runAction (actionsEnabled && inState[i] && !waitWire);
-        if (verbose)
-          $display("%0t: ", timer, actionMsgs[i]);
+        if (verbose) $display("%0t: ", timer, actionMsgs[i]);
         actions[i];
-        if (!shrinkingMode) logEnqWire.send;
         didFire.send;
       endrule
       rule runActionNotPossible (actionsEnabled && inState[i] && !waitWire);
@@ -753,21 +1067,23 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       endrule
     end
 
-  // Generate rules to run statements, guarded by the current state.
-  // Statements may take many cycles, hence waitWire.
-  for (Integer i = 0; i < length(stmts); i=i+1)
+  // Generate rules to run statements, guarded by the current state
+  // --------------------------------------------------------------
+
+  // Statements may take many cycles, hence 'waitWire'.
+
+  Integer numStmts = length(stmts);
+  for (Integer i = 0; i < numStmts; i=i+1)
     begin
       Integer s = length(actions)+i;
       Reg#(Bool) fsmRunning <- mkReg(False);
       FSM fsm <- mkFSMWithPred(stmts[i], actionsEnabled && inState[s]);
 
       rule runStmt (actionsEnabled && inState[s] && !fsmRunning);
-        if (verbose)
-          $display("%0t: ", timer, stmtMsgs[i]);
+        if (verbose) $display("%0t: ", timer, stmtMsgs[i]);
         fsm.start;
         fsmRunning <= True;
         waitWire.send;
-        if (!shrinkingMode) logEnqWire.send;
       endrule
 
       rule assertWait (actionsEnabled && inState[s] && fsmRunning && !fsm.done);
@@ -780,78 +1096,185 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       endrule
     end
 
-  // Generate rules to modify logs
-  if (params.useIterativeDeepening && params.useShrinking)
-  begin
+  // No-op state
+  // -----------
 
-    for (Integer i = 0; i < length(logItems); i=i+1)
-      begin
-        let logEnq   = tpl_1(logItems[i]);
-        let logRot   = tpl_2(logItems[i]);
-        let logClear = tpl_3(logItems[i]);
-
-        // Enqueue the current state into the log
-        (* mutually_exclusive = "triggerEnq,triggerRot" *)
-        rule triggerEnq (logEnqWire);
-          logEnq;
-        endrule
-
-        // Remove the head of the log and append it to the end
-        rule triggerRot (logRotWire);
-          logRot;
-        endrule
-
-        // Clear the log
-        rule triggerClear (logClearWire);
-          logClear;
-        endrule
-      end
-
-    // Also update the state and timer logs
-    (* mutually_exclusive = "enqLogs,rotLogs" *)
-    rule enqLogs (logEnqWire);
-      stateLog.enq(state);
-      timeLog.enq(timer);
-    endrule
-
-    rule rotLogs (logRotWire);
-      stateLog.enq(stateLog.first); stateLog.deq;
-      timeLog.enq(timeLog.first); timeLog.deq;
-    endrule
-
-    rule clearLogs (logClearWire);
-      stateLog.clear;
-      timeLog.clear;
-    endrule
-  end
-
-  // No-op.
   rule noOp (actionsEnabled && state == 0);
-    if (params.showNoOp && verbose)
-      $display("%0t: No-op", timer);
+    if (params.showNoOp && verbose) $display("%0t: No-op", timer);
+    if (numStates == 1) didFire.send;
   endrule
 
-  // Single walk of state space ===============================================
+  // LFSRs: loading, storing, saving, and restoring
+  // ----------------------------------------------
 
-  // One long walk of the state space.
-  Stmt singleWalk =
+  RotatingQueue#(Bit#(16)) shadows <- mkRotatingQueue(numLFSRs);
+  Reg#(Bit#(32)) iterCount         <- mkReg(0);
+
+  // Copy the value of each LFSR to the corresponding shadow register
+
+  rule ruleSaveLFSRs (saveLFSRs);
+    function Bit#(16) f(LFSR16 x) = x.value;
+    shadows.store(List::map(f, lfsrs));
+  endrule
+
+  // Copy the value of each shadow register the to corresponding LFSR
+
+  rule ruleRestoreLFSRs (seeded && !actionsEnabled && restoreLFSRs);
+    function Action f(LFSR16 x, Bit#(16) y) = x.seed(y);
+    let _ <- List::zipWithM(f, lfsrs, shadows.load);
+  endrule
+
+  // Load a file of seeds into the shadow LFSRs
+
+  Stmt loadFromFile = 
     seq
       action
-        // Show ensure-failure messages?
+        $display("Loading state from '%s'", filename);
+
+        // Open file for reading
+        let file <- $fopen(filename, "r");
+
+        // Check result
+        if (file == InvalidFile) begin
+          $display("Can't open file '%s'", filename);
+          $finish(0);
+        end
+        seedFile <= file;
+
+        // Ignore first character
+        let _  <- $fgetc(file);
+
+        // Initialise
+        testDone <= False;
+        iterCount <= 0;
+      endaction
+
+      while (!testDone)
+        action
+          let x <- getSeed(seedFile);
+          shadows.put(x);
+
+          // Increment loop counter
+          iterCount <= iterCount+1;
+          if (iterCount+1 == fromInteger(numLFSRs)) testDone <= True;
+        endaction
+
+      // Close file
+      $fclose(seedFile);
+    endseq;
+
+  // Store the values of the shadow LFSRs to a file
+
+  Stmt storeToFile =
+    seq
+      action
+        $write("\nSaving state to '%s'", filename);
+
+        // Open file for writing
+        let file <- $fopen(filename, "w");
+
+        // Check result
+        if (file == InvalidFile) begin
+          $display("Can't open file '%s'", filename);
+          $finish(0);
+        end
+        seedFile <= file;
+
+        // Write single char: '1' if counter-example found; '0' otherwise
+        $fwrite(file, failureFound ? "1" : "0");
+
+        // Initialise
+        testDone <= False;
+        iterCount <= 0;
+      endaction
+
+      while (!testDone)
+        action
+          let x <- shadows.get;
+          putSeed(seedFile, x);
+
+          // Increment loop counter
+          iterCount <= iterCount+1;
+          if (iterCount+1 == fromInteger(numLFSRs)) testDone <= True;
+        endaction
+
+      // Close file
+      $fclose(seedFile);
+    endseq;
+
+  // Store the values of the shadow LFSRs to a FIFO
+
+  Reg#(Bit#(16)) tmpReg     <- mkReg(0);
+  Reg#(Bit#(3)) nibbleCount <- mkReg(0);
+
+  function Stmt storeToFIFO(FIFOF#(Bit#(8)) fifo) =
+    seq
+      action
+        // Write single char: '1' if counter-example found; '0' otherwise
+        await(fifo.notFull);
+        fifo.enq(failureFound ? 49 : 48);
+
+        // Initialise
+        testDone <= False;
+        iterCount <= 0;
+      endaction
+
+      while (!testDone)
+        seq
+          action
+            let x <- shadows.get;
+            tmpReg <= x;
+            nibbleCount <= 0;
+          endaction
+
+          while (nibbleCount <= 3)
+            action
+              await(fifo.notFull);
+              fifo.enq(hexEncode(tmpReg[15:12]));
+              tmpReg <= tmpReg << 4;
+              nibbleCount <= nibbleCount+1;
+            endaction
+
+          action
+            // Increment loop counter
+            iterCount <= iterCount+1;
+            if (iterCount+1 == fromInteger(numLFSRs)) testDone <= True;
+          endaction
+        endseq
+    endseq;
+
+  // Store the values of the shadow LFSRs to file or FIFO, depending
+  // on module parameters.
+
+  function Stmt storeToOutput();
+    if (params.outputFIFO matches tagged Valid .fifo)
+      return storeToFIFO(fifo);
+    else
+      return storeToFile;
+  endfunction
+
+  // Single walk of the state space
+  // ------------------------------
+
+  Stmt singleWalk =
+    seq
+      // Initialise
+      action
+        await(seeded);
+        testDone   <= False;
+        resetTimer <= True;
+
+        // Show 'ensure' failure messages?
         let _ <- List::mapM(assignReg(True), ensureShows);
       endaction
 
-      // Initialise
-      randomState.cntrl.init;
-      await(randGensInitialised);
-      testDone <= False;
-      resetTimer <= True;
       preStmt;
       count <= 1;
       while (!testDone)
         action
           await(!waitWire);
-          let nextState <- randomState.next;
+          stateGen.next;
+          let nextState = bound(stateGen.out, numStates-1);
           if (failureFound)
             begin
               count <= 0;
@@ -877,41 +1300,65 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
         $display("FAILED: counter-example found.");
       else
         $display("OK: passed %0d iterations", params.numIterations);
+      action
+        if (params.outputFIFO matches tagged Valid .fifo)
+          fifo.enq(failureFound ? 49 : 48);
+      endaction
     endseq;
 
-  // Replay counter-example ===================================================
+  // Replay a counter-example
+  // ------------------------
+
+  Reg#(Bit#(32)) counterExampleLen  <- mkReg(0);
+  FIFOF#(Maybe#(Bit#(32))) timeFIFO <- mkSizedFIFOF(maxSeqLen);
+  Reg#(Bit#(32)) omitNum            <- mkReg(0);
+  Reg#(Maybe#(Bit#(32))) deleteNum  <- mkReg(Invalid);
 
   Stmt replay =
     seq
-      // Reset circuit under test
+      // Reset the circuit under test
       params.id.rst.assertReset();
+
+      // Initialisation
       action
-        // Initialise replay
         resetFailure <= True;
-        resetTimer <= True;
+        resetTimer   <= True;
+        state        <= 0;
+        restoreLFSRs.send;
       endaction
 
       // Test sequence starts here
       delay(1);
       preStmt;
-      while (count < counterExampleLength)
+      delay(1);
+      while (count < counterExampleLen)
         action
           await(!waitWire);
-          if (timer+1 >= timeLog.first)
-            begin
-              if (omitMask[count] == False)
-                begin
-                  state <= stateLog.first;
-                  replayWire <= True;
-                end
-              else
+          if (timeFIFO.first matches tagged Valid .t) begin
+            if (timer >= t) begin
+              timeFIFO.deq;
+              if (deleteNum != tagged Valid count) begin
+                timeFIFO.enq(timeFIFO.first);
+                if (omitNum != count)
+                  state <= bound(stateGen.out, numStates-1);
+                else
+                  state <= 0;
+              end else begin
+                timeFIFO.enq(Invalid);
                 state <= 0;
-              logRotWire <= True;
+              end
               count <= count+1;
-            end
-          else
+            end else
+              state <= 0;
+          end else begin
+            timeFIFO.deq;
+            timeFIFO.enq(Invalid);
+            count <= count+1;
             state <= 0;
+          end
+          stateGen.next;
         endaction
+
       action
         await(!waitWire);
         count <= 0;
@@ -919,25 +1366,25 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       postStmt;
     endseq;
 
-  // Shrink counter-example ===================================================
+  // Shrink a counter-example
+  // ------------------------
 
   Stmt shrink =
     seq
       // Initialise shrinker
       action
-        omitNum <= 0;
-        shrinkingMode <= True;
-        for (Integer i=0; i < logSize; i=i+1) omitMask[i] <= False;
+        omitNum   <= 0;
+        deleteNum <= Invalid;
       endaction
 
-      // Try to omit each element of the failing sequence, and if
-      // it succeeds, undo the omission.
-      while (omitNum <= counterExampleLength)
+      // Try to omit each element of the failing sequence, and
+      // if it succeeds, undo the omission.
+      while (omitNum <= counterExampleLen)
         seq
           action
             if (verbose) $display("=== Shrink attempt %0d ===", omitNum);
             // Display counter example even if verbose == False
-            if (!verbose && omitNum == counterExampleLength)
+            if (!verbose && omitNum == counterExampleLen)
               begin
                 verbose <= True;
                 let _ <- List::mapM(assignReg(True), ensureShows);
@@ -945,145 +1392,31 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
               end
           endaction
 
-          omitMask[omitNum] <= True;
-
           // Replay counter-example with omission
           replay;
 
-          // If failure lost, undo omission
-          if (!failureFound)
-            omitMask[omitNum] <= False;
+          // If failure remains, make omission permanenent
+          if (failureFound)
+            deleteNum <= tagged Valid omitNum;
+          else
+            deleteNum <= Invalid;
           omitNum <= omitNum+1;
-      endseq
+        endseq
 
       // Restore original settings
       action
-        shrinkingMode <= False;
         verbose <= params.verbose;
         let _ <- List::mapM(assignReg(params.verbose), ensureShows);
       endaction
     endseq;
 
-  // Save a counter example to a file =========================================
-
-  Reg#(Bit#(32)) iterCount <- mkReg(0);
-
-  Stmt saveToFile =
-    seq
-      action
-        $display("Saving counter-example to '%s'", logFilename);
-
-        // Open file for writing
-        let file <- $fopen(logFilename, "w");
-
-        // Check result
-        if (file == InvalidFile) begin
-          $display("Can't open file '%s'", logFilename);
-          $finish(0);
-        end
-        logFile <= file;
-
-        // Write counter example length to file
-        putFile(file, counterExampleLength);
-
-        // Write the omit mask, i.e. the result of shrinking
-        putFile(file, readVReg(omitMask));
-
-        // Initialise
-        testDone <= False;
-        iterCount <= 0;
-      endaction
-
-      while (!testDone)
-        action
-          // Write first element of every log into file
-          putFile(logFile, timeLog.first);
-          putFile(logFile, stateLog.first);
-          for (Integer i = 0; i < length(saveFuncs); i=i+1)
-            saveFuncs[i](logFile);
-
-          // Rotate logs
-          logRotWire <= True;
-
-          // Increment loop counter
-          iterCount <= iterCount+1;
-          if (iterCount+1 == counterExampleLength) testDone <= True;
-        endaction
-
-      // Close file
-      $fclose(logFile);
-    endseq;
-
-  // Load a counter example from a file =======================================
-
-  Stmt loadFromFile =
-    seq
-      action
-        $display("Loading counter-example from '%s'", logFilename);
-
-        // Open file for reading
-        let file <- $fopen(logFilename, "r");
-
-        // Check result
-        if (file == InvalidFile) begin
-          $display("Can't open file '%s'", logFilename);
-          $finish(0);
-        end
-        logFile <= file;
-
-        // Read counter example length from file
-        let len <- getFile(file);
-        counterExampleLength <= len;
-
-        // Read omit mask from file
-        Vector#(LogSize, Bool) omit <- getFile(file);
-        for (Integer i = 0; i < logSize; i=i+1) omitMask[i] <= omit[i];
-
-        // Initialise
-        testDone <= False;
-        iterCount <= 0;
-      endaction
-
-      while (!testDone)
-        action
-          // To remove conflict warnings
-          await(!logEnqWire && !logRotWire);
-
-          // Read first element of every log into file
-          let t <- getFile(logFile);
-          timeLog.enq(t);
-          let s <- getFile(logFile);
-          stateLog.enq(s);
-          for (Integer i = 0; i < length(restoreFuncs); i=i+1)
-            restoreFuncs[i](logFile);
-
-          // Increment loop counter
-          iterCount <= iterCount+1;
-          if (iterCount+1 == counterExampleLength) testDone <= True;
-        endaction
-
-      // Close file
-      $fclose(logFile);
-    endseq;
-
-  // Replay counter example from file =========================================
-
-  Stmt replayFromFile =
-    seq
-      loadFromFile;
-      action
-        shrinkingMode <= True;
-        verbose <= True;
-        let _ <- List::mapM(assignReg(True), ensureShows);
-      endaction
-      replay;
-    endseq;
-
-  // Iterative deepening ======================================================
+  // Iterative deepening
+  // -------------------
 
   // State for iterative-deepening
-  Reg#(Bit#(32)) currentDepth <- mkReg(0);
-  Reg#(Bit#(32)) testNum <- mkReg(0);
+  Reg#(Bit#(32)) currentDepth      <- mkReg(0);
+  Reg#(Bit#(32)) testNum           <- mkReg(0);
+  Reg#(Bit#(32)) startTime         <- mkReg(0);
 
   Stmt iterativeDeepening =
     seq
@@ -1105,12 +1438,12 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       while (!failureFound && iterCount < params.numIterations)
         seq
           // Check that the depth is OK
-          if (params.useShrinking && currentDepth >= fromInteger(logSize))
-            seq
-              $display("Maximum depth of %0d", logSize-1, " exceeded.");
-              $display("Increase the 'logSize' parameter in BlueCheck.bsv.");
-              $finish(0);
-            endseq
+          if (params.useShrinking &&
+            currentDepth >= fromInteger(maxSeqLen)) seq
+            $display("Max depth of %0d", maxSeqLen-1, " exceeded.");
+            $display("Increase the 'maxSeqLen' parameter in BlueCheck.bsv.");
+            $finish(0);
+          endseq
 
           // Produce a test sequence of size 'currentDepth'
           testNum <= 0;
@@ -1124,9 +1457,14 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
                 $write("=== Depth %0d, Test %0d/%0d ===%c", currentDepth,
                   testNum+1, params.id.testsPerDepth, verbose ? 10 : 13);
                 testDone <= False;
-                counterExampleLength <= currentDepth;
-                logClearWire <= True;
+                counterExampleLen <= currentDepth;
                 resetTimer <= True;
+                state <= 0;
+                if (params.useShrinking) timeFIFO.clear;
+                if (resumeFlag && !resumed)
+                  begin restoreLFSRs.send; resumed <= True; end
+                else
+                  saveLFSRs.send;
               endaction
 
               // Test sequence starts here
@@ -1138,12 +1476,14 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
                   // This action only fires when not waiting for a
                   // user-defined statement to finish.
                   await(!waitWire);
-                  let nextState <- randomState.next;
-                  let actionFired = (state != 0 && didFire);
+                  stateGen.next;
+                  let nextState = bound(stateGen.out, numStates-1);
+                  if (didFire && params.useShrinking)
+                    timeFIFO.enq(tagged Valid (startTime));
                   if (failureFound)
                     begin
                       // We found a counter example smaller than the depth
-                      counterExampleLength <= actionFired ? count : count-1;
+                      counterExampleLen <= didFire ? count : count-1;
                       count <= 0;
                       testDone <= True;
                     end
@@ -1151,7 +1491,8 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
                     begin
                       // Change the state for the next clock cycle
                       state <= nextState;
-                      if (actionFired)
+                      startTime <= timer;
+                      if (didFire)
                         begin
                           // Is this the final element of the sequence?
                           if (count < currentDepth)
@@ -1174,22 +1515,27 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
           if (!failureFound) $display("");
         endseq
 
+      // Save the state of the LFSRs so we can resume testing later
+      // from this point.
+      storeToOutput;
+
       // We've reached the end of iterative deepening.  Either we
       // found a failure or performed the desired number of tests.
       if (!failureFound)
         $display("\nOK: passed %0d test sequences",
                    params.numIterations*params.id.testsPerDepth);
-      else if (params.useShrinking)
-        seq
+      else seq
+        if (params.useShrinking)
           shrink;
-          saveToFile;
-         endseq
-      else
-        $display("\nFAILED: counter-example found");
-      
+        else
+          $display("\nFAILED: counter-example found");
+      endseq
     endseq;
 
-  // Iterative deepening (with iteraction) ====================================
+  // Iterative deepening (with iteraction)
+  // -------------------------------------
+
+  Reg#(Bool) doneUI <- mkReg(False);
 
   Stmt iterativeDeepeningUI =
     seq
@@ -1199,8 +1545,7 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
       endaction
 
       // Initialise the random generators
-      randomState.cntrl.init;
-      await(randGensInitialised);
+      await(seeded);
 
       // Loop while user demands it
       while (! doneUI)
@@ -1218,29 +1563,28 @@ module [Module] blueCheckCore#( BlueCheck#(Empty) bc
         endseq
     endseq;
 
-  // Top-level iterative deepening checker for simulation =====================
-
-  Reg#(Bool) replayFromFileMode <- mkReg(False);
+  // Top-level iterative deepening checker for simulation
+  // ----------------------------------------------------
 
   Stmt iterativeDeepeningTop =
     seq
-      action
-         let b <- $test$plusargs("replay");
-         replayFromFileMode <= b;
-      endaction
-      if (replayFromFileMode)
-        replayFromFile;
-      else
-        iterativeDeepeningUI;
+      await(gotPlusArgs);
+      if (resumeFlag) loadFromFile;
+      iterativeDeepeningUI;
     endseq;
 
-  // Result of blueCheck module
+  // Result of module
+  // ----------------
+
   return params.useIterativeDeepening
        ? iterativeDeepeningTop : singleWalk;
 endmodule
 
-// Default parameters for single state walk
-BlueCheck_Params bcParamsSimple =
+// ============================================================================
+// Default parameters for single state-space walk
+// ============================================================================
+
+BlueCheck_Params bcParams =
   BlueCheck_Params {
     verbose               : True
   , showNonFire           : False
@@ -1250,9 +1594,13 @@ BlueCheck_Params bcParamsSimple =
   , useShrinking          : False
   , id                    : ?
   , numIterations         : 1000
+  , outputFIFO            : Invalid
   };
 
+// ============================================================================
 // Default parameters for iterative deepening
+// ============================================================================
+
 function BlueCheck_Params bcParamsID(MakeResetIfc rst);
   function incDepth(x) = x+10;
 
@@ -1274,14 +1622,19 @@ function BlueCheck_Params bcParamsID(MakeResetIfc rst);
     , useShrinking          : True
     , id                    : idParams
     , numIterations         : 2
+    , outputFIFO            : Invalid
     };
 
   return params;
 endfunction
 
+// ============================================================================
+// Variants of the model-checker generator
+// ============================================================================
+
 // Simple version returning a statement
 module [Module] blueCheckStmt#(BlueCheck#(Empty) bc)(Stmt);
-  Stmt s <- blueCheckCore(bc, bcParamsSimple);
+  Stmt s <- mkModelChecker(bc, bcParams);
   return s;
 endmodule
 
@@ -1291,10 +1644,22 @@ module [Module] blueCheck#(BlueCheck#(Empty) bc)();
   mkAutoFSM(s);
 endmodule
 
+// Simple version that constructs a synthesisable checker
+module [Module] blueCheckSynth#(BlueCheck#(Empty) bc) (JtagUart);
+  FIFOF#(Bit#(8)) out <- mkUGFIFOF;
+  let params           = bcParams;
+  params.interactive   = False;
+  params.outputFIFO    = tagged Valid out;
+  JtagUart uart       <- mkJtagUart(out);
+  Stmt s              <- mkModelChecker(bc, params);
+  mkAutoFSM(s);
+  return uart;
+endmodule
+
 // Iterative deepening version returning a statement
 module [Module] blueCheckStmtID# (BlueCheck#(Empty) bc
                                 , MakeResetIfc rst ) (Stmt);
-  Stmt s <- blueCheckCore(bc, bcParamsID(rst));
+  Stmt s <- mkModelChecker(bc, bcParamsID(rst));
   return s;
 endmodule
 
@@ -1305,4 +1670,16 @@ module [Module] blueCheckID#( BlueCheck#(Empty) bc
   mkAutoFSM(s);
 endmodule
 
-endpackage
+// Iterative deepening version that constructs a synthesisable checker
+module [Module] blueCheckIDSynth#( BlueCheck#(Empty) bc
+                                 , MakeResetIfc rst) (JtagUart);
+  FIFOF#(Bit#(8)) out <- mkUGFIFOF;
+  let params           = bcParamsID(rst);
+  params.interactive   = False;
+  params.outputFIFO    = tagged Valid out;
+  params.useShrinking  = False;
+  JtagUart uart       <- mkJtagUart(out);
+  Stmt s              <- mkModelChecker(bc, params);
+  mkAutoFSM(s);
+  return uart;
+endmodule

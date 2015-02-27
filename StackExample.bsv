@@ -164,11 +164,25 @@ module [Module] testStack ();
   blueCheck(checkStack);
 endmodule
 
+// Synthesisable version
+module [Module] testStackSynth (JtagUart);
+  let uart <- blueCheckSynth(checkStack);
+  return uart;
+endmodule
+
 // Iterative deepening version
 module [Module] testStackID ();
   Clock clk <- exposeCurrentClock;
   MakeResetIfc r <- mkReset(0, True, clk);
   blueCheckID(checkStackWithReset(r.new_rst), r);
+endmodule
+
+// Synthesisable & iterative deepening version
+module [Module] testStackIDSynth (JtagUart);
+  Clock clk <- exposeCurrentClock;
+  MakeResetIfc r <- mkReset(0, True, clk);
+  let uart <- blueCheckIDSynth(checkStackWithReset(r.new_rst), r);
+  return uart;
 endmodule
 
 ///////////////////////
