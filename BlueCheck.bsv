@@ -631,14 +631,10 @@ function Bit#(4) hexDecode(Bit#(8) x);
 endfunction
 
 // ============================================================================
-// Loading and storing seeds
+// File I/O
 // ============================================================================
 
-// When a counter-example is found in simulation, we can save the
-// seeds of all LFSRs to a file or UART so that it can be replayed.
-// Thanks to Jon Woodruff for this suggestion.
-
-function Action putSeed(File f, Bit#(16) data) =
+function Action putHalfWord(File f, Bit#(16) data) =
   action
     $fwrite(f, "%c", hexEncode(data[15:12]));
     $fwrite(f, "%c", hexEncode(data[11:8]));
@@ -646,7 +642,7 @@ function Action putSeed(File f, Bit#(16) data) =
     $fwrite(f, "%c", hexEncode(data[3:0]));
   endaction;
 
-function ActionValue#(Bit#(16)) getSeed(File f) =
+function ActionValue#(Bit#(16)) getHalfWord(File f) =
   actionvalue
     Bit#(16) x;
     int c0 <- $fgetc(f);
@@ -954,6 +950,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
                                inStatePar, parLists);
   Reg#(Bool) verbose      <- mkReg(params.verbose);
   Reg#(File) seedFile     <- mkReg(InvalidFile);
+  Reg#(Bit#(32)) currentDepth <- mkReg(0);
 
   // When count is 0, actions/statements are disabled
   // ------------------------------------------------
@@ -1109,6 +1106,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
 
   RotatingQueue#(Bit#(16)) shadows <- mkRotatingQueue(numLFSRs);
   Reg#(Bit#(32)) iterCount         <- mkReg(0);
+  Reg#(Bool) loopDone              <- mkReg(False);
 
   // Copy the value of each LFSR to the corresponding shadow register
 
@@ -1144,19 +1142,25 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         // Ignore first character
         let _  <- $fgetc(file);
 
+        // Read depth
+        let d0 <- getHalfWord(file);
+        let d1 <- getHalfWord(file);
+        currentDepth <= {d0, d1};
+        $display("d = ", {d0, d1});
+
         // Initialise
-        testDone <= False;
+        loopDone <= False;
         iterCount <= 0;
       endaction
 
-      while (!testDone)
+      while (!loopDone)
         action
-          let x <- getSeed(seedFile);
+          let x <- getHalfWord(seedFile);
           shadows.put(x);
 
           // Increment loop counter
           iterCount <= iterCount+1;
-          if (iterCount+1 == fromInteger(numLFSRs)) testDone <= True;
+          if (iterCount+1 == fromInteger(numLFSRs)) loopDone <= True;
         endaction
 
       // Close file
@@ -1165,7 +1169,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
 
   // Store the values of the shadow LFSRs to a file
 
-  Stmt storeToFile =
+  function Stmt storeToFile(Bit#(32) depth) =
     seq
       action
         $write("\nSaving state to '%s'", filename);
@@ -1183,19 +1187,23 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         // Write single char: '1' if counter-example found; '0' otherwise
         $fwrite(file, failureFound ? "1" : "0");
 
+        // Write depth
+        putHalfWord(file, depth[31:16]);
+        putHalfWord(file, depth[15:0]);
+
         // Initialise
-        testDone <= False;
+        loopDone <= False;
         iterCount <= 0;
       endaction
 
-      while (!testDone)
+      while (!loopDone)
         action
           let x <- shadows.get;
-          putSeed(seedFile, x);
+          putHalfWord(seedFile, x);
 
           // Increment loop counter
           iterCount <= iterCount+1;
-          if (iterCount+1 == fromInteger(numLFSRs)) testDone <= True;
+          if (iterCount+1 == fromInteger(numLFSRs)) loopDone <= True;
         endaction
 
       // Close file
@@ -1204,10 +1212,10 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
 
   // Store the values of the shadow LFSRs to a FIFO
 
-  Reg#(Bit#(16)) tmpReg     <- mkReg(0);
-  Reg#(Bit#(3)) nibbleCount <- mkReg(0);
+  Reg#(Bit#(32)) tmpReg     <- mkReg(0);
+  Reg#(Bit#(4)) nibbleCount <- mkReg(0);
 
-  function Stmt storeToFIFO(FIFOF#(Bit#(8)) fifo) =
+  function Stmt storeToFIFO(FIFOF#(Bit#(8)) fifo, Bit#(32) depth) =
     seq
       action
         // Write single char: '1' if counter-example found; '0' otherwise
@@ -1215,15 +1223,25 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         fifo.enq(failureFound ? 49 : 48);
 
         // Initialise
-        testDone <= False;
+        loopDone <= False;
         iterCount <= 0;
+        nibbleCount <= 0;
+        tmpReg <= depth;
       endaction
 
-      while (!testDone)
+      while (nibbleCount <= 7)
+        action
+          await(fifo.notFull);
+          fifo.enq(hexEncode(tmpReg[31:28]));
+          tmpReg <= tmpReg << 4;
+          nibbleCount <= nibbleCount+1;
+        endaction
+
+      while (!loopDone)
         seq
           action
             let x <- shadows.get;
-            tmpReg <= x;
+            tmpReg <= {0, x};
             nibbleCount <= 0;
           endaction
 
@@ -1238,7 +1256,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
           action
             // Increment loop counter
             iterCount <= iterCount+1;
-            if (iterCount+1 == fromInteger(numLFSRs)) testDone <= True;
+            if (iterCount+1 == fromInteger(numLFSRs)) loopDone <= True;
           endaction
         endseq
     endseq;
@@ -1246,11 +1264,11 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   // Store the values of the shadow LFSRs to file or FIFO, depending
   // on module parameters.
 
-  function Stmt storeToOutput();
+  function Stmt storeToOutput(Bit#(32) depth);
     if (params.outputFIFO matches tagged Valid .fifo)
-      return storeToFIFO(fifo);
+      return storeToFIFO(fifo, depth);
     else
-      return storeToFile;
+      return storeToFile(depth);
   endfunction
 
   // Single walk of the state space
@@ -1414,7 +1432,6 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   // -------------------
 
   // State for iterative-deepening
-  Reg#(Bit#(32)) currentDepth      <- mkReg(0);
   Reg#(Bit#(32)) testNum           <- mkReg(0);
   Reg#(Bit#(32)) startTime         <- mkReg(0);
 
@@ -1434,7 +1451,8 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
 
       // Each iteration will produce N test sequences of size 'depth'.
       // After each iteration, the depth is increased.
-      currentDepth <= params.id.initialDepth;
+      if (! resumeFlag)
+        currentDepth <= params.id.initialDepth;
       while (!failureFound && iterCount < params.numIterations)
         seq
           // Check that the depth is OK
@@ -1510,14 +1528,16 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
               testNum <= testNum+1;
             endseq
 
-          currentDepth <= params.id.incDepth(currentDepth);
-          iterCount <= iterCount+1;
-          if (!failureFound) $display("");
+          if (!failureFound) action
+            $display("");
+            currentDepth <= params.id.incDepth(currentDepth);
+            iterCount <= iterCount+1;
+          endaction
         endseq
 
       // Save the state of the LFSRs so we can resume testing later
       // from this point.
-      storeToOutput;
+      storeToOutput(currentDepth);
 
       // We've reached the end of iterative deepening.  Either we
       // found a failure or performed the desired number of tests.
