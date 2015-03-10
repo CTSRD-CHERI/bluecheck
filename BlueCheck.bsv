@@ -7,7 +7,6 @@ import Clocks        :: *;
 import FIFOF         :: *;
 import ConfigReg     :: *;
 import Vector        :: *;
-import LFSR          :: *;
 
 // ============================================================================
 // Module parameters
@@ -95,7 +94,7 @@ typedef union tagged {
   Tuple3#(Freq, App, Stmt) StmtItem;
   Tuple2#(Freq, List#(String)) ParItem;
   Action GenItem;
-  List#(LFSR16) LFSRItem;
+  List#(PRNG16) PRNGItem;
   Tuple2#(Fmt, Bool) InvariantItem;
   Tuple2#(Bool, Reg#(Bool)) EnsureItem;
   Stmt PreStmtItem;
@@ -118,8 +117,8 @@ function List#(Tuple2#(Freq, List#(String))) getParItem(Item item) =
 function List#(Action) getGenItem(Item item) =
   item matches tagged GenItem .x ? single(x) : Nil;
 
-function List#(LFSR16) getLFSRItem(Item item) =
-  item matches tagged LFSRItem .xs ? xs : Nil;
+function List#(PRNG16) getPRNGItem(Item item) =
+  item matches tagged PRNGItem .xs ? xs : Nil;
 
 function List#(Tuple2#(Fmt, Bool)) getInvariantItem(Item item) =
   item matches tagged InvariantItem .x ? single(x) : Nil;
@@ -166,65 +165,63 @@ function App appendArg(App app, Fmt arg) =
 // Psuedo-random number generation
 // ============================================================================
 
-// This is a slight variant of the standard 16-bit LFSR.  The
-// difference is that it mutates the seed when the period of the LFSR
-// has elapsed.  The aim is to avoid synchronising with other LFSRs
-// that may exist, which could lead to cycles.
+// This is a slight variant of a standard 16-bit LCG.  The difference
+// is that it mutates the seed when the period has elapsed.  The aim
+// is to avoid synchronising with other LCGs that may exist, which
+// could lead to cycles.
 
-interface LFSR16;
-  method Action seed(Bit#(16) s);
+interface PRNG16;
+  method Action seed(Bit#(32) s);
   method Action next;
-  method Bit#(16) value;
+  method Bit#(32) value;
   method Bit#(16) out;
 endinterface
 
-module mkLFSR16 (LFSR16);
-  // Create a standard 16-bit LFSR.
-  LFSR#(Bit#(16)) lfsr <- mkLFSR_16;
-
+module mkPRNG16 (PRNG16);
   // Store the seed.
-  Reg#(Bit#(16)) seedReg <- mkReg(0);
+  Reg#(Bit#(31)) seedReg <- mkReg(0);
+  Reg#(Bit#(31)) state   <- mkReg(0);
 
   // Has next() has been called at least once since the last call to seed()?
   Reg#(Bool) running <- mkReg(False);
 
   // Signals from the methods to the following rule
-  Wire#(Maybe#(Bit#(16))) seedWire <- mkDWire(Invalid);
+  Wire#(Maybe#(Bit#(32))) seedWire <- mkDWire(Invalid);
   PulseWire nextWire               <- mkPulseWire;
 
   // The rule ('seed' takes priority over 'next')
   rule step;
     if (seedWire matches tagged Valid .s) begin
       running <= False;
-      seedReg <= s;
-      lfsr.seed(s);
+      seedReg <= s[30:0];
+      state   <= s[30:0];
     end
     else if (nextWire) begin
       running <= True;
-      if (running && seedReg == lfsr.value)
+      if (running && seedReg == state)
         begin
           // Period has elapsed!
           let newSeed = seedReg+1;
-          lfsr.seed(newSeed);
           seedReg <= newSeed;
+          state   <= newSeed;
         end
       else
-        lfsr.next;
+        state <= state*1103515245 + 12345;
     end
   endrule
 
-  // Set the value of the LFSR (must be non-zero)
-  method Action seed(Bit#(16) s);
+  // Set the seed
+  method Action seed(Bit#(32) s);
     seedWire <= tagged Valid s;
   endmethod
 
   // Output to use as psuedo-random number
-  method Bit#(16) out = ilvBits(lfsr.value[15:8], lfsr.value[7:0]);
+  method Bit#(16) out = state[30:15];
 
-  // Obtain the current value of the LFSR.
-  method Bit#(16) value = lfsr.value;
+  // Obtain the current state
+  method Bit#(32) value = {0, state};
 
-  // Update the LFSR with it's next value.
+  // Generate a new psuedo-random number
   method Action next;
     nextWire.send;
   endmethod
@@ -241,24 +238,24 @@ interface Gen#(type t);
 endinterface
 
 // The following standard generator works for any type in Bits and
-// Bounded, and uses LFSRs to give psuedo-random data.
+// Bounded, and uses PRNGs to give psuedo-random data.
 
 module [BlueCheck] mkGen (Gen#(t))
   provisos ( Bits#(t, n)
            , Bounded#(t)
            , Add#(extra, n, TMul#(TDiv#(n, 16), 16)));
-  // Create as many 16-bit LFSRs as needed.
-  Vector#(TDiv#(n, 16), LFSR16) lfsr <- replicateM(mkLFSR16);
+  // Create as many 16-bit PRNGs as needed.
+  Vector#(TDiv#(n, 16), PRNG16) prng <- replicateM(mkPRNG16);
 
-  // Expose these LFSRs to BlueCheck (which will seed them).
-  addToCollection(tagged LFSRItem (toList(lfsr)));
+  // Expose these PRNGs to BlueCheck (which will seed them).
+  addToCollection(tagged PRNGItem (toList(prng)));
 
-  // Generate a value using the LFSRs.
+  // Generate a value using the PRNGs.
   method ActionValue#(t) gen;
     Vector#(TDiv#(n, 16), Bit#(16)) x;
     for (Integer i = 0; i < valueOf(TDiv#(n, 16)); i=i+1) begin
-      lfsr[i].next;
-      x[i] = lfsr[i].out;
+      prng[i].next;
+      x[i] = prng[i].out;
     end
     return unpack(truncate(pack(x)));
   endmethod
@@ -604,15 +601,6 @@ function Stmt seqList(List#(Stmt) xs);
   else return (seq List::head(xs); seqList(List::tail(xs)); endseq);
 endfunction
 
-// Interleave bits
-
-function Bit#(m) ilvBits(Bit#(n) x, Bit#(n) y) provisos (Add#(n, n, m));
-  Bit#(m) z;
-  for (Integer i = 0; i < valueOf(m); i=i+1)
-    z[i] = (i%2) == 0 ? x[i/2] : y[i/2];
-  return z;
-endfunction
-
 // ============================================================================
 // ASCII encoding/decoding
 // ============================================================================
@@ -656,6 +644,19 @@ function ActionValue#(Bit#(16)) getHalfWord(File f) =
     return x;
   endactionvalue;
 
+function Action putWord(File f, Bit#(32) data) =
+  action
+    putHalfWord(f, data[31:16]);
+    putHalfWord(f, data[15:0]);
+  endaction;
+
+function ActionValue#(Bit#(32)) getWord(File f) =
+  actionvalue
+    Bit#(16) x <- getHalfWord(f);
+    Bit#(16) y <- getHalfWord(f);
+    return {x, y};
+  endactionvalue;
+
 // The filename used to store a counter-example on the filesystem.
 
 String filename = "State.txt";
@@ -664,8 +665,8 @@ String filename = "State.txt";
 // Rotating Queue
 // ============================================================================
 
-// Each LFSR has a 'shadow register'.  These shadow registers can be
-// used to save or restore the state of all the LFSRs.  Since we want
+// Each PRNG has a 'shadow register'.  These shadow registers can be
+// used to save or restore the state of all the PRNGs.  Since we want
 // to be able to easily serialise this state, for transfer to a file
 // or over a UART, we using the following rotating queue structure.
 
@@ -882,7 +883,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   // Read any flags from the command-line
   // ------------------------------------
 
-  // Resume testing from a point specified by a file of LFSR seeds
+  // Resume testing from a point specified by a file of PRNG seeds
   Reg#(Bool) resumeFlag <- mkReg(False);
   Reg#(Bool) resumed    <- mkReg(False);
 
@@ -911,7 +912,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   let invariantBools = concat(map(getInvariantItem, items));
   let preStmt        = seqList(concat(map(getPreStmtItem, items)));
   let postStmt       = seqList(concat(map(getPostStmtItem, items)));
-  let lfsrItems      = concat(map(getLFSRItem, items));
+  let prngItems      = concat(map(getPRNGItem, items));
   let actionApps     = map(tpl_2, actionItems);
   let stmtApps       = map(tpl_2, stmtItems);
   let actionMsgs     = map(formatApp, actionApps);
@@ -936,9 +937,9 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   List#(Integer) allFreqs =  append(freqs, parFreqs);
   Integer sumFreqs        =  sum(freqs);
   Integer numStates       =  1+sumFreqs+sum(parFreqs);
-  LFSR16 stateGen         <- mkLFSR16;
-  List#(LFSR16) lfsrs     =  Cons(stateGen, lfsrItems);
-  Integer numLFSRs        =  List::length(lfsrs);
+  PRNG16 stateGen         <- mkPRNG16;
+  List#(PRNG16) prngs     =  Cons(stateGen, prngItems);
+  Integer numPRNGs        =  List::length(prngs);
   ConfigReg#(State) state <- mkConfigReg(0);
   PulseWire waitWire      <- mkPulseWireOR;
   PulseWire didFire       <- mkPulseWireOR;
@@ -1006,22 +1007,22 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
 
   Reg#(Bool) seeded <- mkReg(False);
 
-  rule seedLFSRs (!seeded);
-    for (Integer i = 0; i < numLFSRs; i=i+1)
-      lfsrs[i].seed(fromInteger(((i**3) % 65535) + 1));
+  rule seedPRNGs (!seeded);
+    for (Integer i = 0; i < numPRNGs; i=i+1)
+      prngs[i].seed(fromInteger(((i**3) % 65535) + 1));
     seeded <= True;
   endrule
 
   // Generate rules to generate random data
   // --------------------------------------
 
-  PulseWire saveLFSRs     <- mkPulseWire;
-  PulseWire restoreLFSRs  <- mkPulseWire;
+  PulseWire savePRNGs     <- mkPulseWire;
+  PulseWire restorePRNGs  <- mkPulseWire;
 
   Integer numRandomGens = length(randomGens);
   for (Integer i = 0; i < numRandomGens; i=i+1)
     begin
-      rule genRandomData (seeded && !waitWire && !restoreLFSRs && !saveLFSRs);
+      rule genRandomData (seeded && !waitWire && !restorePRNGs && !savePRNGs);
         randomGens[i];
       endrule
     end
@@ -1101,28 +1102,28 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
     if (numStates == 1) didFire.send;
   endrule
 
-  // LFSRs: loading, storing, saving, and restoring
+  // PRNGs: loading, storing, saving, and restoring
   // ----------------------------------------------
 
-  RotatingQueue#(Bit#(16)) shadows <- mkRotatingQueue(numLFSRs);
+  RotatingQueue#(Bit#(32)) shadows <- mkRotatingQueue(numPRNGs);
   Reg#(Bit#(32)) iterCount         <- mkReg(0);
   Reg#(Bool) loopDone              <- mkReg(False);
 
-  // Copy the value of each LFSR to the corresponding shadow register
+  // Copy the value of each PRNG to the corresponding shadow register
 
-  rule ruleSaveLFSRs (saveLFSRs);
-    function Bit#(16) f(LFSR16 x) = x.value;
-    shadows.store(List::map(f, lfsrs));
+  rule ruleSavePRNGs (savePRNGs);
+    function Bit#(32) f(PRNG16 x) = x.value;
+    shadows.store(List::map(f, prngs));
   endrule
 
-  // Copy the value of each shadow register the to corresponding LFSR
+  // Copy the value of each shadow register the to corresponding PRNG
 
-  rule ruleRestoreLFSRs (seeded && !actionsEnabled && restoreLFSRs);
-    function Action f(LFSR16 x, Bit#(16) y) = x.seed(y);
-    let _ <- List::zipWithM(f, lfsrs, shadows.load);
+  rule ruleRestorePRNGs (seeded && !actionsEnabled && restorePRNGs);
+    function Action f(PRNG16 x, Bit#(32) y) = x.seed(y);
+    let _ <- List::zipWithM(f, prngs, shadows.load);
   endrule
 
-  // Load a file of seeds into the shadow LFSRs
+  // Load a file of seeds into the shadow PRNGs
 
   Stmt loadFromFile = 
     seq
@@ -1143,10 +1144,8 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         let _  <- $fgetc(file);
 
         // Read depth
-        let d0 <- getHalfWord(file);
-        let d1 <- getHalfWord(file);
-        currentDepth <= {d0, d1};
-        $display("d = ", {d0, d1});
+        let d <- getWord(file);
+        currentDepth <= d;
 
         // Initialise
         loopDone <= False;
@@ -1155,19 +1154,19 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
 
       while (!loopDone)
         action
-          let x <- getHalfWord(seedFile);
+          let x <- getWord(seedFile);
           shadows.put(x);
 
           // Increment loop counter
           iterCount <= iterCount+1;
-          if (iterCount+1 == fromInteger(numLFSRs)) loopDone <= True;
+          if (iterCount+1 == fromInteger(numPRNGs)) loopDone <= True;
         endaction
 
       // Close file
       $fclose(seedFile);
     endseq;
 
-  // Store the values of the shadow LFSRs to a file
+  // Store the values of the shadow PRNGs to a file
 
   function Stmt storeToFile(Bit#(32) depth) =
     seq
@@ -1188,8 +1187,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         $fwrite(file, failureFound ? "1" : "0");
 
         // Write depth
-        putHalfWord(file, depth[31:16]);
-        putHalfWord(file, depth[15:0]);
+        putWord(file, depth);
 
         // Initialise
         loopDone <= False;
@@ -1199,18 +1197,18 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
       while (!loopDone)
         action
           let x <- shadows.get;
-          putHalfWord(seedFile, x);
+          putWord(seedFile, x);
 
           // Increment loop counter
           iterCount <= iterCount+1;
-          if (iterCount+1 == fromInteger(numLFSRs)) loopDone <= True;
+          if (iterCount+1 == fromInteger(numPRNGs)) loopDone <= True;
         endaction
 
       // Close file
       $fclose(seedFile);
     endseq;
 
-  // Store the values of the shadow LFSRs to a FIFO
+  // Store the values of the shadow PRNGs to a FIFO
 
   Reg#(Bit#(32)) tmpReg     <- mkReg(0);
   Reg#(Bit#(4)) nibbleCount <- mkReg(0);
@@ -1245,10 +1243,10 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
             nibbleCount <= 0;
           endaction
 
-          while (nibbleCount <= 3)
+          while (nibbleCount <= 7)
             action
               await(fifo.notFull);
-              fifo.enq(hexEncode(tmpReg[15:12]));
+              fifo.enq(hexEncode(tmpReg[31:28]));
               tmpReg <= tmpReg << 4;
               nibbleCount <= nibbleCount+1;
             endaction
@@ -1256,12 +1254,12 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
           action
             // Increment loop counter
             iterCount <= iterCount+1;
-            if (iterCount+1 == fromInteger(numLFSRs)) loopDone <= True;
+            if (iterCount+1 == fromInteger(numPRNGs)) loopDone <= True;
           endaction
         endseq
     endseq;
 
-  // Store the values of the shadow LFSRs to file or FIFO, depending
+  // Store the values of the shadow PRNGs to file or FIFO, depending
   // on module parameters.
 
   function Stmt storeToOutput(Bit#(32) depth);
@@ -1342,7 +1340,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         resetFailure <= True;
         resetTimer   <= True;
         state        <= 0;
-        restoreLFSRs.send;
+        restorePRNGs.send;
       endaction
 
       // Test sequence starts here
@@ -1480,9 +1478,9 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
                 state <= 0;
                 if (params.useShrinking) timeFIFO.clear;
                 if (resumeFlag && !resumed)
-                  begin restoreLFSRs.send; resumed <= True; end
+                  begin restorePRNGs.send; resumed <= True; end
                 else
-                  saveLFSRs.send;
+                  savePRNGs.send;
               endaction
 
               // Test sequence starts here
@@ -1535,7 +1533,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
           endaction
         endseq
 
-      // Save the state of the LFSRs so we can resume testing later
+      // Save the state of the PRNGs so we can resume testing later
       // from this point.
       storeToOutput(currentDepth);
 
