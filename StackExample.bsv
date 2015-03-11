@@ -14,6 +14,7 @@ interface Stack#(numeric type n, type a);
   method a top;
   method Bool isEmpty;
   method Action clear;
+  method Bit#(n) size;
 endinterface
 
 //////////////////
@@ -26,29 +27,31 @@ module mkStackSpec (Stack#(n, a))
 
   Reg#(Vector#(TExp#(n), a)) stk <- mkReg(newVector());
 
-  Reg#(UInt#(n)) size <- mkReg(0);
+  Reg#(Bit#(n)) num <- mkReg(0);
 
   method Action push(a x);
-    size <= size+1;
+    num <= num+1;
     stk <= cons(x, init(stk));
   endmethod
 
-  method Action pop if (size > 0);
-    size <= size-1;
+  method Action pop if (num > 0);
+    num <= num-1;
     stk <= append(tail(stk), cons(?, nil));
   endmethod
 
-  method a top if (size > 0);
+  method a top if (num > 0);
     return head(stk);
   endmethod
 
   method Bool isEmpty;
-    return (size==0);
+    return (num==0);
   endmethod
 
   method Action clear;
-    size <= 0;
+    num <= 0;
   endmethod
+
+  method Bit#(n) size = num;
 endmodule
 
 ////////////////////
@@ -160,6 +163,36 @@ module [BlueCheck] checkStackWithReset#(Reset r) ();
   equiv("top"    , spec.top    , imp.top);
 endmodule
 
+// Similar to above, but with classification
+module [BlueCheck] checkStackWithResetAndClassify#(Reset r) ();
+  /* Specification instance */
+  Stack#(8, Bit#(4)) spec <- mkStackSpec(reset_by r);
+
+  /* Implmentation instance */
+  Stack#(8, Bit#(4)) imp <- mkBRAMStack(reset_by r);
+
+  /* Test data classifier */
+  Classifier classifySmall <- mkClassifier("small");
+
+  /* Monitor max stack size */
+  Reg#(Bit#(8)) maxSize <- mkReg(0);
+  PulseWire resetMaxSize <- mkPulseWire;
+  rule updateMaxSize;
+    if (resetMaxSize) maxSize <= 0;
+    else maxSize <= max(maxSize, spec.size);
+  endrule
+
+  addPreAction(resetMaxSize.send);
+
+  equiv("pop"    , spec.pop    , imp.pop);
+  equiv("push"   , spec.push   , imp.push);
+  equiv("isEmpty", spec.isEmpty, imp.isEmpty);
+  equiv("top"    , spec.top    , imp.top);
+  equiv("clear"  , spec.clear  , imp.clear);
+
+  addPostAction(classifySmall(maxSize <= 3));
+endmodule
+
 module [Module] testStack ();
   blueCheck(checkStack);
 endmodule
@@ -175,6 +208,13 @@ module [Module] testStackID ();
   Clock clk <- exposeCurrentClock;
   MakeResetIfc r <- mkReset(0, True, clk);
   blueCheckID(checkStackWithReset(r.new_rst), r);
+endmodule
+
+// Iterative deepening version & classification
+module [Module] testStackIDClassify ();
+  Clock clk <- exposeCurrentClock;
+  MakeResetIfc r <- mkReset(0, True, clk);
+  blueCheckID(checkStackWithResetAndClassify(r.new_rst), r);
 endmodule
 
 // Synthesisable & iterative deepening version

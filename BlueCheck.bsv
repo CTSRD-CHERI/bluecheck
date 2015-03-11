@@ -99,6 +99,7 @@ typedef union tagged {
   Tuple2#(Bool, Reg#(Bool)) EnsureItem;
   Stmt PreStmtItem;
   Stmt PostStmtItem;
+  Classification ClassifyItem;
 } Item;
 
 // Functions for extracting items.
@@ -131,6 +132,9 @@ function List#(Stmt) getPreStmtItem(Item item) =
 
 function List#(Stmt) getPostStmtItem(Item item) =
   item matches tagged PostStmtItem .x ? single(x) : Nil;
+
+function List#(Classification) getClassifyItem(Item item) =
+  item matches tagged ClassifyItem .x ? single(x) : Nil;
 
 // ============================================================================
 // For displaying function applications
@@ -485,6 +489,41 @@ instance Equiv#(a) provisos(Eq#(a), FShow#(a));
 endinstance
 
 // ============================================================================
+// For classifying test data
+// ============================================================================
+
+typedef struct {
+  String name;
+  Reg#(Bit#(32)) positive;
+  Reg#(Bit#(32)) total;
+} Classification;
+
+typedef (function Action f(Bool cond)) Classifier;
+
+module [BlueCheck] mkClassifier#(String text) (Classifier);
+  // Create classify function
+  Reg#(Bit#(32)) positive <- mkReg(0);
+  Reg#(Bit#(32)) total    <- mkReg(0);
+  Classification c;
+  c.name     = text;
+  c.positive = positive;
+  c.total    = total;
+  function Action classifyFunc(Bool cond) = 
+    action total <= total+1; if (cond) positive <= positive+1; endaction;
+  addToCollection(tagged ClassifyItem c);
+  return classifyFunc;
+endmodule
+
+function Action displayClassifications(List#(Classification) cs) =
+  action
+    function Action f(Classification c) =
+      action
+        $display("%0d%%", (c.positive*100)/c.total, " ", c.name);
+      endaction;
+    let _ <- List::mapM(f, cs);
+  endaction;
+
+// ============================================================================
 // Assertions
 // ============================================================================
 
@@ -533,6 +572,17 @@ endmodule
 
 module [BlueCheck] addPostStmt#(Stmt post) (Empty);
   addToCollection(tagged PostStmtItem post);
+endmodule
+
+// Allow user to add custom pre/post actions for each test
+module [BlueCheck] addPreAction#(Action pre) (Empty);
+  Stmt s = seq pre; endseq;
+  addToCollection(tagged PreStmtItem s);
+endmodule
+
+module [BlueCheck] addPostAction#(Action post) (Empty);
+  Stmt s = seq post; endseq;
+  addToCollection(tagged PostStmtItem s);
 endmodule
 
 // ============================================================================
@@ -910,6 +960,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   let randomGens     = concat(map(getGenItem, items));
   let ensureItems    = concat(map(getEnsureItem, items));
   let invariantBools = concat(map(getInvariantItem, items));
+  let classifyItems  = concat(map(getClassifyItem, items));
   let preStmt        = seqList(concat(map(getPreStmtItem, items)));
   let postStmt       = seqList(concat(map(getPostStmtItem, items)));
   let prngItems      = concat(map(getPRNGItem, items));
@@ -1093,6 +1144,11 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         didFire.send;
       endrule
     end
+
+  // Show classifications
+  // --------------------
+
+  Action showClassifications = displayClassifications(classifyItems);
 
   // No-op state
   // -----------
@@ -1315,7 +1371,10 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
       if (failureFound)
         $display("FAILED: counter-example found.");
       else
-        $display("OK: passed %0d iterations", params.numIterations);
+        action
+          $display("OK: passed %0d iterations", params.numIterations);
+          showClassifications;
+        endaction
       action
         if (params.outputFIFO matches tagged Valid .fifo)
           fifo.enq(failureFound ? 49 : 48);
@@ -1540,8 +1599,11 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
       // We've reached the end of iterative deepening.  Either we
       // found a failure or performed the desired number of tests.
       if (!failureFound)
-        $display("\nOK: passed %0d test sequences",
-                   params.numIterations*params.id.testsPerDepth);
+        action
+          $display("\nOK: passed %0d test sequences",
+                     params.numIterations*params.id.testsPerDepth);
+          showClassifications;
+        endaction
       else seq
         if (params.useShrinking)
           shrink;

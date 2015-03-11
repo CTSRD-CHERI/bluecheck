@@ -6,7 +6,8 @@ BSCFLAGS="-keep-fires -cross-info -aggressive-conditions \
 SUFFIXES=
 
 #TOPMOD=testStack
-TOPMOD=testStackID
+#TOPMOD=testStackID
+TOPMOD=testStackIDClassify
 #TOPMOD=testStackAlg
 #TOPMOD=testStackAlgID
 
