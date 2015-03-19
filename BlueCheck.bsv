@@ -22,6 +22,9 @@ typedef struct {
   // Display message when a chosen state is a no-op
   Bool showNoOp;
 
+  // Show the time of each displayed state
+  Bool showTime;
+
   // Generate a checker based on an iterative deepening strategy
   // (If 'False', a single random state walk is performed)
   Bool useIterativeDeepening;
@@ -86,6 +89,7 @@ typedef Integer Freq;
 // automatic creation of an equivalance checker.
 
 typedef ModuleCollect#(Item) BlueCheck;
+typedef ModuleCollect#(Item) Specification;
 
 // BlueCheck modules collect items of the following type.
 
@@ -245,23 +249,40 @@ endinterface
 // Bounded, and uses PRNGs to give psuedo-random data.
 
 module [BlueCheck] mkGen (Gen#(t))
-  provisos ( Bits#(t, n)
-           , Bounded#(t)
-           , Add#(extra, n, TMul#(TDiv#(n, 16), 16)));
+  provisos (Bits#(t, n), Bounded#(t));
+ 
+  // Number of 16-bit PRNGs needed.
+  Integer numPRNGs = (valueOf(n)+15)/16;
+
   // Create as many 16-bit PRNGs as needed.
-  Vector#(TDiv#(n, 16), PRNG16) prng <- replicateM(mkPRNG16);
+  PRNG16 prngs[numPRNGs];
+  List#(PRNG16) list = Nil;
+  for (Integer i = 0; i < numPRNGs; i=i+1) begin
+    let prng <- mkPRNG16;
+    prngs[i] = prng;
+    list     = Cons(prng, list);
+  end
 
   // Expose these PRNGs to BlueCheck (which will seed them).
-  addToCollection(tagged PRNGItem (toList(prng)));
+  addToCollection(tagged PRNGItem list);
 
   // Generate a value using the PRNGs.
   method ActionValue#(t) gen;
-    Vector#(TDiv#(n, 16), Bit#(16)) x;
-    for (Integer i = 0; i < valueOf(TDiv#(n, 16)); i=i+1) begin
-      prng[i].next;
-      x[i] = prng[i].out;
+    Bit#(n) x;
+    for (Integer i = 0; i < numPRNGs; i=i+1)
+      prngs[i].next;
+
+    Integer outer = 0;
+    Integer inner = 0;
+    for (Integer i = 0; i < valueOf(n); i=i+1) begin
+      x[i] = prngs[outer].out[inner];
+      if (inner == 15) begin
+        outer = outer+1;
+        inner = 0;
+      end else
+        inner = inner+1; 
     end
-    return unpack(truncate(pack(x)));
+    return unpack(x);
   endmethod
 endmodule
 
@@ -279,9 +300,7 @@ endtypeclass
 // type, we use the mkGen module defined above.
 
 instance Arbitrary#(t)
-  provisos ( Bits#(t, n)
-           , Bounded#(t)
-           , Add#(extra, n, TMul#(TDiv#(n, 16), 16)));
+  provisos (Bits#(t, n), Bounded#(t));
 
   module [BlueCheck] arbitrary (Gen#(t));
     let gen <- mkGen;
@@ -333,7 +352,7 @@ endinstance
 
 instance Prop#(Bool);
   module [BlueCheck] addProp#(Freq freq, App app, Bool b) ();
-    Fmt msg = $format(formatApp(app), "\nProperty failed");
+    Fmt msg = $format(formatApp(app), "\nProperty does not hold");
     addToCollection(tagged InvariantItem (tuple2(msg, b)));
   endmodule
 endinstance
@@ -343,7 +362,7 @@ endinstance
 instance Prop#(ActionValue#(Bool));
   module [BlueCheck] addProp#(Freq freq, App app, ActionValue#(Bool) a) ();
     Wire#(Bool) success <- mkDWire(True);
-    Fmt msg = $format("Property failed");
+    Fmt msg = $format("Property does not hold");
 
     Action act =
       action
@@ -1045,6 +1064,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
 
   Reg#(Bit#(32)) timer <- mkReg(0);
   Wire#(Bool) resetTimer <- mkDWire(False);
+  Fmt timeInfo = params.showTime ? $format("%0t: ", timer) : $format("");
 
   rule incTimer;
     if (resetTimer)
@@ -1082,7 +1102,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   // ---------------------------------
 
   rule checkEnsure (!failureReg && List::any( \== (False) , ensureBools));
-    if (verbose) $display("%0t: 'ensure' statement failed", timer);
+    if (verbose) $display(timeInfo, "'ensure' statement failed");
   endrule
 
   // Generate rules to check invariants
@@ -1094,7 +1114,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
       let msg = tpl_1(invariantBools[i]);
       let b   = tpl_2(invariantBools[i]);
       rule checkInvariantBool (checkingEnabled && !failureReg && !waitWire);
-        if (!b && verbose) $display("%0t: ", timer, msg);
+        if (!b && verbose) $display(timeInfo, msg);
       endrule
     end
 
@@ -1106,13 +1126,13 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
     begin
       (* preempts = "runAction, runActionNotPossible" *)
       rule runAction (actionsEnabled && inState[i] && !waitWire);
-        if (verbose) $display("%0t: ", timer, actionMsgs[i]);
+        if (verbose) $display(timeInfo, actionMsgs[i]);
         actions[i];
         didFire.send;
       endrule
       rule runActionNotPossible (actionsEnabled && inState[i] && !waitWire);
         if (params.showNonFire && verbose)
-          $display("%0t: [did not fire] ", timer, actionMsgs[i]);
+          $display(timeInfo, "[did not fire] ", actionMsgs[i]);
       endrule
     end
 
@@ -1129,7 +1149,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
       FSM fsm <- mkFSMWithPred(stmts[i], actionsEnabled && inState[s]);
 
       rule runStmt (actionsEnabled && inState[s] && !fsmRunning);
-        if (verbose) $display("%0t: ", timer, stmtMsgs[i]);
+        if (verbose) $display(timeInfo, stmtMsgs[i]);
         fsm.start;
         fsmRunning <= True;
         waitWire.send;
@@ -1154,7 +1174,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   // -----------
 
   rule noOp (actionsEnabled && state == 0);
-    if (params.showNoOp && verbose) $display("%0t: No-op", timer);
+    if (params.showNoOp && verbose) $display(timeInfo, "No-op");
     if (numStates == 1) didFire.send;
   endrule
 
@@ -1355,7 +1375,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
           else
             begin
               state <= nextState;
-              if (state != 0 && didFire)
+              if (didFire)
                 begin
                   if (count < params.numIterations)
                     count <= count+1;
@@ -1368,9 +1388,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
             end
         endaction
       postStmt;
-      if (failureFound)
-        $display("FAILED: counter-example found.");
-      else
+      if (!failureFound)
         action
           $display("OK: passed %0d iterations", params.numIterations);
           showClassifications;
@@ -1669,6 +1687,7 @@ BlueCheck_Params bcParams =
     verbose               : True
   , showNonFire           : False
   , showNoOp              : False
+  , showTime              : False
   , useIterativeDeepening : False
   , interactive           : False
   , useShrinking          : False
@@ -1697,6 +1716,7 @@ function BlueCheck_Params bcParamsID(MakeResetIfc rst);
       verbose               : False
     , showNonFire           : False
     , showNoOp              : False
+    , showTime              : True
     , useIterativeDeepening : True
     , interactive           : True
     , useShrinking          : True

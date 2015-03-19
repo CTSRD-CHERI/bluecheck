@@ -157,6 +157,7 @@ module [BlueCheck] checkStackWithReset#(Reset r) ();
   /* Implmentation instance */
   Stack#(8, Bit#(4)) imp <- mkBRAMStack(reset_by r);
 
+  equiv("clear"  , spec.clear  , imp.clear);
   equiv("pop"    , spec.pop    , imp.pop);
   equiv("push"   , spec.push   , imp.push);
   equiv("isEmpty", spec.isEmpty, imp.isEmpty);

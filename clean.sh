@@ -5,4 +5,6 @@ rm -f testStackID
 rm -f testStackAlg
 rm -f testStackAlgID
 rm -f testStackIDClassify
+rm -f mkArithChecker
+rm -f mkFirstHotChecker
 rm -f test*.v

@@ -6,8 +6,8 @@ BSCFLAGS="-keep-fires -cross-info -aggressive-conditions \
 SUFFIXES=
 
 #TOPMOD=testStack
-#TOPMOD=testStackID
-TOPMOD=testStackIDClassify
+TOPMOD=testStackID
+#TOPMOD=testStackIDClassify
 #TOPMOD=testStackAlg
 #TOPMOD=testStackAlgID
 
@@ -16,6 +16,10 @@ TOPMOD=testStackIDClassify
 #TOPMOD=testStackIDSynth
 
 TOPFILE=StackExample.bsv
+
+#TOPMOD=mkArithChecker
+#TOPMOD=mkFirstHotChecker
+#TOPFILE=PureExamples.bsv
 
 echo Compiling $TOPMOD in file $TOPFILE
 if [ "$SYNTH" = "1" ]
