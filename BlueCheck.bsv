@@ -103,6 +103,7 @@ typedef union tagged {
   Tuple2#(Bool, Reg#(Bool)) EnsureItem;
   Stmt PreStmtItem;
   Stmt PostStmtItem;
+  Action AlwaysItem;
   Classification ClassifyItem;
 } Item;
 
@@ -136,6 +137,9 @@ function List#(Stmt) getPreStmtItem(Item item) =
 
 function List#(Stmt) getPostStmtItem(Item item) =
   item matches tagged PostStmtItem .x ? single(x) : Nil;
+
+function List#(Action) getAlwaysItem(Item item) =
+  item matches tagged AlwaysItem .x ? single(x) : Nil;
 
 function List#(Classification) getClassifyItem(Item item) =
   item matches tagged ClassifyItem .x ? single(x) : Nil;
@@ -186,12 +190,8 @@ interface PRNG16;
 endinterface
 
 module mkPRNG16 (PRNG16);
-  // Store the seed.
-  Reg#(Bit#(31)) seedReg <- mkReg(0);
-  Reg#(Bit#(31)) state   <- mkReg(0);
-
-  // Has next() has been called at least once since the last call to seed()?
-  Reg#(Bool) running <- mkReg(False);
+  // State of the generator
+  Reg#(Bit#(31)) state <- mkReg(0);
 
   // Signals from the methods to the following rule
   Wire#(Maybe#(Bit#(32))) seedWire <- mkDWire(Invalid);
@@ -199,23 +199,10 @@ module mkPRNG16 (PRNG16);
 
   // The rule ('seed' takes priority over 'next')
   rule step;
-    if (seedWire matches tagged Valid .s) begin
-      running <= False;
-      seedReg <= s[30:0];
-      state   <= s[30:0];
-    end
-    else if (nextWire) begin
-      running <= True;
-      if (running && seedReg == state)
-        begin
-          // Period has elapsed!
-          let newSeed = seedReg+1;
-          seedReg <= newSeed;
-          state   <= newSeed;
-        end
-      else
-        state <= state*1103515245 + 12345;
-    end
+    if (seedWire matches tagged Valid .s)
+      state <= s[30:0];
+    else if (nextWire)
+      state <= state*1103515245 + 12345;
   endrule
 
   // Set the seed
@@ -224,7 +211,7 @@ module mkPRNG16 (PRNG16);
   endmethod
 
   // Output to use as psuedo-random number
-  method Bit#(16) out = state[30:15];
+  method Bit#(16) out = reverseBits(state[30:15]);
 
   // Obtain the current state
   method Bit#(32) value = {0, state};
@@ -248,7 +235,7 @@ endinterface
 // The following standard generator works for any type in Bits and
 // Bounded, and uses PRNGs to give psuedo-random data.
 
-module [BlueCheck] mkGen (Gen#(t))
+module [BlueCheck] mkGenDefault (Gen#(t))
   provisos (Bits#(t, n), Bounded#(t));
  
   // Number of 16-bit PRNGs needed.
@@ -287,23 +274,23 @@ module [BlueCheck] mkGen (Gen#(t))
 endmodule
 
 // ============================================================================
-// Arbitrary class
+// MkGen class (like Arbitrary in QuickCheck)
 // ============================================================================
 
-// The Arbitrary class defines a generator for each type.
+// The MkGen class defines a generator for each type.
 
-typeclass Arbitrary#(type t);
-  module [BlueCheck] arbitrary (Gen#(t));
+typeclass MkGen#(type t);
+  module [BlueCheck] mkGen (Gen#(t));
 endtypeclass
 
 // By default, i.e. if no more specific instance exists for a given
 // type, we use the mkGen module defined above.
 
-instance Arbitrary#(t)
+instance MkGen#(t)
   provisos (Bits#(t, n), Bounded#(t));
 
-  module [BlueCheck] arbitrary (Gen#(t));
-    let gen <- mkGen;
+  module [BlueCheck] mkGen (Gen#(t));
+    let gen <- mkGenDefault;
     return gen;
   endmodule
 endinstance
@@ -387,10 +374,10 @@ endinstance
 // Recursive case: generate input.
 
 instance Prop#(function b f(a x))
-  provisos(Prop#(b), Bits#(a, n), Arbitrary#(a), FShow#(a));
+  provisos(Prop#(b), Bits#(a, n), MkGen#(a), FShow#(a));
     module [BlueCheck] addProp#(Freq freq, App app, function b f(a x))();
       Reg#(a) aReg    <- mkRegU;
-      Gen#(a) aRandom <- arbitrary;
+      Gen#(a) aRandom <- mkGen;
 
       Action genRandom =
         action
@@ -473,12 +460,12 @@ endinstance
 // Recursive case: generate input
 
 instance Equiv#(function b f(a x))
-  provisos(Equiv#(b), Bits#(a, n), Arbitrary#(a), FShow#(a));
+  provisos(Equiv#(b), Bits#(a, n), MkGen#(a), FShow#(a));
     module [BlueCheck] addEquiv#(Freq freq, App app
                                           , function b f(a x)
                                           , function b g(a y)) ();
       Reg#(a) aReg    <- mkRegU;
-      Gen#(a) aRandom <- arbitrary;
+      Gen#(a) aRandom <- mkGen;
 
       Action genRandom =
         action
@@ -562,6 +549,11 @@ module [BlueCheck] getEnsure (Ensure);
   return ensureFunc;
 endmodule
 
+module [BlueCheck] mkEnsure (Ensure);
+  Ensure ensure <- getEnsure;
+  return ensure;
+endmodule
+
 // Similar to above, but the assertion function also takes a message
 // to be displayed if the assertion fails.
 
@@ -602,6 +594,11 @@ endmodule
 module [BlueCheck] addPostAction#(Action post) (Empty);
   Stmt s = seq post; endseq;
   addToCollection(tagged PostStmtItem s);
+endmodule
+
+// All user to add custom always actions
+module [BlueCheck] addAlwaysAction#(Action act) (Empty);
+  addToCollection(tagged AlwaysItem act);
 endmodule
 
 // ============================================================================
@@ -982,6 +979,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   let classifyItems  = concat(map(getClassifyItem, items));
   let preStmt        = seqList(concat(map(getPreStmtItem, items)));
   let postStmt       = seqList(concat(map(getPostStmtItem, items)));
+  let alwaysItems    = concat(map(getAlwaysItem, items));
   let prngItems      = concat(map(getPRNGItem, items));
   let actionApps     = map(tpl_2, actionItems);
   let stmtApps       = map(tpl_2, stmtItems);
@@ -1080,7 +1078,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
 
   rule seedPRNGs (!seeded);
     for (Integer i = 0; i < numPRNGs; i=i+1)
-      prngs[i].seed(fromInteger(((i**3) % 65535) + 1));
+      prngs[i].seed(fromInteger(i+1));
     seeded <= True;
   endrule
 
@@ -1162,6 +1160,17 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
       rule finishStmt (actionsEnabled && inState[s] && fsmRunning && fsm.done);
         fsmRunning <= False;
         didFire.send;
+      endrule
+    end
+
+  // Generate rules to for 'always' actions
+  // --------------------------------------
+
+  Integer numAlways = length(alwaysItems);
+  for (Integer i = 0; i < numAlways; i=i+1)
+    begin
+      rule alwaysAction (count != 0);
+        alwaysItems[i];
       endrule
     end
 

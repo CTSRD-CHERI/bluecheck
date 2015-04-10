@@ -47,3 +47,22 @@ endmodule
 module [Module] mkFirstHotChecker ();
   blueCheck(firstHotSpec);
 endmodule
+
+// ============================================================================
+// Custom generator
+// ============================================================================
+
+typedef struct { Bit#(n) value; } OneHot#(type n);
+
+module [Specification] genOneHot (Gen#(OneHot#(n)));
+  Gen#(Bit#(TLog#(n))) index <- mkGen;
+  method ActionValue#(OneHot#(n)) gen;
+    let i <- index.gen;
+    return OneHot { value: 1 << bound(i, 2**valueOf(n)) };
+  endmethod
+endmodule
+
+instance MkGen#(OneHot#(n));
+  mkGen = genOneHot;
+endinstance
+

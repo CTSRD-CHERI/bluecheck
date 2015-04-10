@@ -191,6 +191,7 @@ module [BlueCheck] checkStackWithResetAndClassify#(Reset r) ();
   equiv("top"    , spec.top    , imp.top);
   equiv("clear"  , spec.clear  , imp.clear);
 
+  //addAlwaysAction(classifySmall(spec.size <= 2));
   addPostAction(classifySmall(maxSize <= 3));
 endmodule
 
