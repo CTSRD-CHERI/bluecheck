@@ -52,13 +52,14 @@ endmodule
 // Custom generator
 // ============================================================================
 
-typedef struct { Bit#(n) value; } OneHot#(type n);
+typedef struct { Bit#(n) value; } OneHot#(type n)
+  deriving (Bits, Bounded, FShow);
 
 module [Specification] genOneHot (Gen#(OneHot#(n)));
   Gen#(Bit#(TLog#(n))) index <- mkGen;
   method ActionValue#(OneHot#(n)) gen;
     let i <- index.gen;
-    return OneHot { value: 1 << bound(i, 2**valueOf(n)) };
+    return OneHot { value: 1 << bound(i, valueOf(n)-1) };
   endmethod
 endmodule
 
@@ -66,3 +67,13 @@ instance MkGen#(OneHot#(n));
   mkGen = genOneHot;
 endinstance
 
+module [Specification] customGenExample ();
+  function Bool oneIsHot(OneHot#(4) x) =
+    countOnes(x.value) == 1;
+
+  prop("oneIsHot", oneIsHot);
+endmodule
+
+module [Module] mkCustomGenExample ();
+  blueCheck(customGenExample);
+endmodule

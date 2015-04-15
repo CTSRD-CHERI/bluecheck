@@ -183,7 +183,7 @@ module [BlueCheck] checkStackWithResetAndClassify#(Reset r) ();
     else maxSize <= max(maxSize, spec.size);
   endrule
 
-  addPreAction(resetMaxSize.send);
+  pre("", resetMaxSize.send);
 
   equiv("pop"    , spec.pop    , imp.pop);
   equiv("push"   , spec.push   , imp.push);
@@ -191,8 +191,7 @@ module [BlueCheck] checkStackWithResetAndClassify#(Reset r) ();
   equiv("top"    , spec.top    , imp.top);
   equiv("clear"  , spec.clear  , imp.clear);
 
-  //addAlwaysAction(classifySmall(spec.size <= 2));
-  addPostAction(classifySmall(maxSize <= 3));
+  post("", classifySmall(maxSize <= 3));
 endmodule
 
 module [Module] testStack ();

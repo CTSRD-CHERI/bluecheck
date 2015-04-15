@@ -101,9 +101,8 @@ typedef union tagged {
   List#(PRNG16) PRNGItem;
   Tuple2#(Fmt, Bool) InvariantItem;
   Tuple2#(Bool, Reg#(Bool)) EnsureItem;
-  Stmt PreStmtItem;
-  Stmt PostStmtItem;
-  Action AlwaysItem;
+  Tuple2#(App, Stmt) PreStmtItem;
+  Tuple2#(App, Stmt) PostStmtItem;
   Classification ClassifyItem;
 } Item;
 
@@ -132,14 +131,11 @@ function List#(Tuple2#(Fmt, Bool)) getInvariantItem(Item item) =
 function List#(Tuple2#(Bool, Reg#(Bool))) getEnsureItem(Item item) =
   item matches tagged EnsureItem .x ? single(x) : Nil;
 
-function List#(Stmt) getPreStmtItem(Item item) =
+function List#(Tuple2#(App, Stmt)) getPreStmtItem(Item item) =
   item matches tagged PreStmtItem .x ? single(x) : Nil;
 
-function List#(Stmt) getPostStmtItem(Item item) =
+function List#(Tuple2#(App, Stmt)) getPostStmtItem(Item item) =
   item matches tagged PostStmtItem .x ? single(x) : Nil;
-
-function List#(Action) getAlwaysItem(Item item) =
-  item matches tagged AlwaysItem .x ? single(x) : Nil;
 
 function List#(Classification) getClassifyItem(Item item) =
   item matches tagged ClassifyItem .x ? single(x) : Nil;
@@ -233,10 +229,10 @@ interface Gen#(type t);
 endinterface
 
 // The following standard generator works for any type in Bits and
-// Bounded, and uses PRNGs to give psuedo-random data.
+// uses PRNGs to give psuedo-random data.
 
 module [BlueCheck] mkGenDefault (Gen#(t))
-  provisos (Bits#(t, n), Bounded#(t));
+  provisos (Bits#(t, n));
  
   // Number of 16-bit PRNGs needed.
   Integer numPRNGs = (valueOf(n)+15)/16;
@@ -255,7 +251,7 @@ module [BlueCheck] mkGenDefault (Gen#(t))
 
   // Generate a value using the PRNGs.
   method ActionValue#(t) gen;
-    Bit#(n) x;
+    Bit#(n) x = 0;
     for (Integer i = 0; i < numPRNGs; i=i+1)
       prngs[i].next;
 
@@ -283,11 +279,93 @@ typeclass MkGen#(type t);
   module [BlueCheck] mkGen (Gen#(t));
 endtypeclass
 
-// By default, i.e. if no more specific instance exists for a given
-// type, we use the mkGen module defined above.
+// Standard instances
+
+instance MkGen#(void);
+  mkGen = mkGenDefault;
+endinstance
+
+instance MkGen#(Bool);
+  mkGen = mkGenDefault;
+endinstance
+
+instance MkGen#(Ordering);
+  mkGen = mkGenDefault;
+endinstance
+
+instance MkGen#(Bit#(n));
+  mkGen = mkGenDefault;
+endinstance
+
+instance MkGen#(Int#(n));
+  mkGen = mkGenDefault;
+endinstance
+
+instance MkGen#(UInt#(n));
+  mkGen = mkGenDefault;
+endinstance
+
+instance MkGen#(Maybe#(t)) provisos (MkGen#(t));
+  module [BlueCheck] mkGen (Gen#(Maybe#(t)));
+    Gen#(Bool) boolGen <- mkGen;
+    Gen#(t)    tGen    <- mkGen;
+    method ActionValue#(Maybe#(t)) gen;
+      let v <- boolGen.gen;
+      let x <- tGen.gen;
+      return (v ? Valid(x) : Nothing);
+    endmethod
+  endmodule
+endinstance
+
+instance MkGen#(Vector#(n, t)) provisos (MkGen#(t));
+  module [BlueCheck] mkGen (Gen#(Vector#(n, t)));
+    Vector#(n, Gen#(t)) gens <- replicateM(mkGen);
+    method ActionValue#(Vector#(n, t)) gen;
+      Vector#(n, t) v;
+      for (Integer i = 0; i < valueOf(n); i=i+1) begin
+        let x <- gens[i].gen;
+        v[i] = x;
+      end
+      return v;
+    endmethod
+  endmodule
+endinstance
+
+instance MkGen#(Tuple2#(a, b))
+  provisos (MkGen#(a), MkGen#(b));
+  module [BlueCheck] mkGen (Gen#(Tuple2#(a, b)));
+    Gen#(a) aGen <- mkGen;
+    Gen#(b) bGen <- mkGen;
+    method ActionValue#(Tuple2#(a, b)) gen;
+      let x <- aGen.gen;
+      let y <- bGen.gen;
+      return tuple2(x, y);
+    endmethod
+  endmodule
+endinstance
+
+instance MkGen#(Tuple3#(a, b, c))
+  provisos (MkGen#(a), MkGen#(b), MkGen#(c));
+  module [BlueCheck] mkGen (Gen#(Tuple3#(a, b, c)));
+    Gen#(a) aGen <- mkGen;
+    Gen#(b) bGen <- mkGen;
+    Gen#(c) cGen <- mkGen;
+    method ActionValue#(Tuple3#(a, b, c)) gen;
+      let x <- aGen.gen;
+      let y <- bGen.gen;
+      let z <- cGen.gen;
+      return tuple3(x, y, z);
+    endmethod
+  endmodule
+endinstance
+
+// Default instance.  If none of the above instances match a given
+// type, we use the following default instance.  This instance
+// exploits the "overlapping instances" feature and I'm still unsure
+// as to whether we actually want it.
 
 instance MkGen#(t)
-  provisos (Bits#(t, n), Bounded#(t));
+  provisos (Bits#(t, n));
 
   module [BlueCheck] mkGen (Gen#(t));
     let gen <- mkGenDefault;
@@ -495,6 +573,72 @@ instance Equiv#(a) provisos(Eq#(a), FShow#(a));
 endinstance
 
 // ============================================================================
+// Adding pre/post statements
+// ============================================================================
+
+// Pre or post statement?
+typedef enum { PRE, POST } PreOrPost deriving (Eq);
+
+// Add a property to be checked.
+
+typeclass PrePost#(type a);
+  module [BlueCheck] addPrePost#(PreOrPost p, App app, a f) ();
+endtypeclass
+
+// Short-hand for pre statement.
+
+module [BlueCheck] pre#(String name, a f) ()
+    provisos(PrePost#(a));
+  addPrePost(PRE, App { name: name, args: Nil}, f);
+endmodule
+
+// Short-hand for post statement.
+
+module [BlueCheck] post#(String name, a f) ()
+    provisos(PrePost#(a));
+  addPrePost(POST, App { name: name, args: Nil}, f);
+endmodule
+
+// Base case 1: an action.
+
+instance PrePost#(Action);
+  module [BlueCheck] addPrePost#(PreOrPost p, App app, Action a) ();
+    Stmt s = seq a; endseq;
+    addPrePost(p, app, s);
+  endmodule
+endinstance
+
+// Base case 2: a statement.
+
+instance PrePost#(Stmt);
+  module [BlueCheck] addPrePost#(PreOrPost p, App app, Stmt s) ();
+    if (p == PRE)
+      addToCollection(tagged PreStmtItem (tuple2(app, s)));
+    else
+      addToCollection(tagged PostStmtItem (tuple2(app, s)));
+  endmodule
+endinstance
+
+// Recursive case: generate input.
+
+instance PrePost#(function b f(a x))
+  provisos(PrePost#(b), Bits#(a, n), MkGen#(a), FShow#(a));
+    module [BlueCheck] addPrePost#(PreOrPost p, App app, function b f(a x))();
+      Reg#(a) aReg    <- mkRegU;
+      Gen#(a) aRandom <- mkGen;
+
+      Action genRandom =
+        action
+          let a <- aRandom.gen;
+          aReg <= a;
+        endaction;
+      
+      addToCollection(tagged GenItem genRandom);
+      addPrePost(p, appendArg(app, fshow(aReg)), f(aReg));
+    endmodule
+endinstance
+
+// ============================================================================
 // For classifying test data
 // ============================================================================
 
@@ -570,38 +714,6 @@ module [BlueCheck] getEnsureMsg (EnsureMsg);
 endmodule
 
 // ============================================================================
-// Pre and post statements
-// ============================================================================
-
-// Allow user to add custom pre/post statements for each test
-// sequence that is generated.
-
-// Allow user to add custom pre/post statements for each test
-module [BlueCheck] addPreStmt#(Stmt pre) (Empty);
-  addToCollection(tagged PreStmtItem pre);
-endmodule
-
-module [BlueCheck] addPostStmt#(Stmt post) (Empty);
-  addToCollection(tagged PostStmtItem post);
-endmodule
-
-// Allow user to add custom pre/post actions for each test
-module [BlueCheck] addPreAction#(Action pre) (Empty);
-  Stmt s = seq pre; endseq;
-  addToCollection(tagged PreStmtItem s);
-endmodule
-
-module [BlueCheck] addPostAction#(Action post) (Empty);
-  Stmt s = seq post; endseq;
-  addToCollection(tagged PostStmtItem s);
-endmodule
-
-// All user to add custom always actions
-module [BlueCheck] addAlwaysAction#(Action act) (Empty);
-  addToCollection(tagged AlwaysItem act);
-endmodule
-
-// ============================================================================
 // Parallel properties
 // ============================================================================
 
@@ -662,9 +774,19 @@ endfunction
 
 // Sequence a list of statements.
 
-function Stmt seqList(List#(Stmt) xs);
-  if (xs matches tagged Nil) return (seq delay(1); endseq);
-  else return (seq List::head(xs); seqList(List::tail(xs)); endseq);
+function Stmt seqList(Bool show, List#(Tuple2#(App, Stmt)) xs);
+  if (xs matches tagged Nil)
+    return (seq delay(1); endseq);
+  else begin
+    let t   = List::head(xs);
+    let app = tpl_1(t);
+    Stmt s  =
+      seq
+        action if (show && app.name != "") $display(formatApp(app)); endaction
+        tpl_2(t);
+      endseq;
+    return (seq s; seqList(show, List::tail(xs)); endseq);
+  end
 endfunction
 
 // ============================================================================
@@ -963,6 +1085,9 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
     gotPlusArgs <= True;
   endrule
 
+  // Enable/disable display statements
+  Reg#(Bool) verbose      <- mkReg(params.verbose);
+
   // Extract items from BlueCheck collection
   // ---------------------------------------
 
@@ -977,9 +1102,8 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   let ensureItems    = concat(map(getEnsureItem, items));
   let invariantBools = concat(map(getInvariantItem, items));
   let classifyItems  = concat(map(getClassifyItem, items));
-  let preStmt        = seqList(concat(map(getPreStmtItem, items)));
-  let postStmt       = seqList(concat(map(getPostStmtItem, items)));
-  let alwaysItems    = concat(map(getAlwaysItem, items));
+  let preStmt        = seqList(verbose, concat(map(getPreStmtItem, items)));
+  let postStmt       = seqList(verbose, concat(map(getPostStmtItem, items)));
   let prngItems      = concat(map(getPRNGItem, items));
   let actionApps     = map(tpl_2, actionItems);
   let stmtApps       = map(tpl_2, stmtItems);
@@ -1017,9 +1141,9 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   List#(Bool) inState     =  mergeConds(inStateSeq,
                                append(actionNames, stmtNames),
                                inStatePar, parLists);
-  Reg#(Bool) verbose      <- mkReg(params.verbose);
   Reg#(File) seedFile     <- mkReg(InvalidFile);
   Reg#(Bit#(32)) currentDepth <- mkReg(0);
+  Reg#(Bool) prePostActive <- mkReg(False);
 
   // When count is 0, actions/statements are disabled
   // ------------------------------------------------
@@ -1091,7 +1215,8 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   Integer numRandomGens = length(randomGens);
   for (Integer i = 0; i < numRandomGens; i=i+1)
     begin
-      rule genRandomData (seeded && !waitWire && !restorePRNGs && !savePRNGs);
+      rule genRandomData (seeded && !waitWire && !prePostActive
+                                 && !restorePRNGs && !savePRNGs);
         randomGens[i];
       endrule
     end
@@ -1160,17 +1285,6 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
       rule finishStmt (actionsEnabled && inState[s] && fsmRunning && fsm.done);
         fsmRunning <= False;
         didFire.send;
-      endrule
-    end
-
-  // Generate rules to for 'always' actions
-  // --------------------------------------
-
-  Integer numAlways = length(alwaysItems);
-  for (Integer i = 0; i < numAlways; i=i+1)
-    begin
-      rule alwaysAction (count != 0);
-        alwaysItems[i];
       endrule
     end
 
@@ -1369,7 +1483,10 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         let _ <- List::mapM(assignReg(True), ensureShows);
       endaction
 
+      prePostActive <= True;
       preStmt;
+      prePostActive <= False;
+
       count <= 1;
       while (!testDone)
         action
@@ -1396,7 +1513,11 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
                 end
             end
         endaction
+
+      prePostActive <= True;
       postStmt;
+      prePostActive <= False;
+
       if (!failureFound)
         action
           $display("OK: passed %0d iterations", params.numIterations);
@@ -1431,7 +1552,10 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
 
       // Test sequence starts here
       delay(1);
+      prePostActive <= True;
       preStmt;
+      prePostActive <= False;
+
       delay(1);
       while (count < counterExampleLen)
         action
@@ -1465,7 +1589,10 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         await(!waitWire);
         count <= 0;
       endaction
+
+      prePostActive <= True;
       postStmt;
+      prePostActive <= False;
     endseq;
 
   // Shrink a counter-example
@@ -1571,7 +1698,10 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
 
               // Test sequence starts here
               delay(1);
+              prePostActive <= True;
               preStmt;   // Execute user-defined pre-statement
+              prePostActive <= False;
+
               count <= 1;
               while (!testDone)
                 action
@@ -1608,7 +1738,11 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
                         end
                     end
                 endaction
+
+              prePostActive <= True;
               postStmt; // Execute user-defined post-statement
+              prePostActive <= False;
+
               testNum <= testNum+1;
             endseq
 

@@ -19,6 +19,7 @@ TOPFILE=StackExample.bsv
 
 #TOPMOD=mkArithChecker
 #TOPMOD=mkFirstHotChecker
+#TOPMOD=mkCustomGenExample
 #TOPFILE=PureExamples.bsv
 
 echo Compiling $TOPMOD in file $TOPFILE
