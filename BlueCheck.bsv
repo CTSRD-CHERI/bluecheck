@@ -25,6 +25,9 @@ typedef struct {
   // Show the time of each displayed state
   Bool showTime;
 
+  // Is the wedge-detector enabled?
+  Bool wedgeDetect;
+
   // Generate a checker based on an iterative deepening strategy
   // (If 'False', a single random state walk is performed)
   Bool useIterativeDeepening;
@@ -1145,6 +1148,9 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   Reg#(Bit#(32)) currentDepth <- mkReg(0);
   Reg#(Bool) prePostActive <- mkReg(False);
 
+  // Wedge detector: count consecutive non-firings
+  Reg#(Bit#(16)) consecutiveNonFires <- mkReg(0);
+
   // When count is 0, actions/statements are disabled
   // ------------------------------------------------
 
@@ -1166,18 +1172,20 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
 
   Reg#(Bool) failureReg    <- mkConfigReg(False);
   Wire#(Bool) resetFailure <- mkDWire(False);
+  PulseWire wedgeFailure   <- mkPulseWireOR;
   Bool ensureFailure       =  List::any( \== (False), ensureBools);
   Bool invariantFailure    = (waitWire || !checkingEnabled) ? False
                            : List::any( \== (False),
                                         map (tpl_2, invariantBools));
   Bool failureFound        = ensureFailure
                           || invariantFailure
+                          || wedgeFailure
                           || failureReg;
   
   rule trackFailure;
     if (resetFailure)
       failureReg <= False;
-    else if (ensureFailure || invariantFailure)
+    else if (ensureFailure || invariantFailure || wedgeFailure)
       failureReg <= True;
   endrule
 
@@ -1253,11 +1261,30 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         actions[i];
         didFire.send;
       endrule
-      rule runActionNotPossible (actionsEnabled && inState[i] && !waitWire);
-        if (params.showNonFire && verbose)
+      rule runActionNotPossible (actionsEnabled && inState[i] && !waitWire
+                                   && params.showNonFire);
+        if (verbose)
           $display(timeInfo, "[did not fire] ", actionMsgs[i]);
       endrule
     end
+
+  // Wedge detector
+  // --------------
+
+  rule wedgeDetect (params.wedgeDetect && actionsEnabled && !waitWire);
+    if (didFire)
+      consecutiveNonFires <= 0;
+    else begin
+      if (consecutiveNonFires == 10000)
+        begin
+          if (verbose) $display("\nWedge detected\n");
+          consecutiveNonFires <= 0;
+          wedgeFailure.send;
+        end
+     else
+        consecutiveNonFires <= consecutiveNonFires+1;
+    end
+  endrule
 
   // Generate rules to run statements, guarded by the current state
   // --------------------------------------------------------------
@@ -1276,6 +1303,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         fsm.start;
         fsmRunning <= True;
         waitWire.send;
+        consecutiveNonFires <= 0;
       endrule
 
       rule assertWait (actionsEnabled && inState[s] && fsmRunning && !fsm.done);
@@ -1831,6 +1859,7 @@ BlueCheck_Params bcParams =
   , showNonFire           : False
   , showNoOp              : False
   , showTime              : False
+  , wedgeDetect           : False
   , useIterativeDeepening : False
   , interactive           : False
   , useShrinking          : False
@@ -1860,6 +1889,7 @@ function BlueCheck_Params bcParamsID(MakeResetIfc rst);
     , showNonFire           : False
     , showNoOp              : False
     , showTime              : True
+    , wedgeDetect           : False
     , useIterativeDeepening : True
     , interactive           : True
     , useShrinking          : True
