@@ -1014,7 +1014,7 @@ endfunction
 // When shrinking is enabled, the length of the sequences generated
 // must be bounded.
 
-Integer maxSeqLen = 64;
+Integer maxSeqLen = 256;
 
 // ============================================================================
 // Communication from FPGA to host PC
@@ -1173,6 +1173,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   Reg#(Bool) failureReg    <- mkConfigReg(False);
   Wire#(Bool) resetFailure <- mkDWire(False);
   PulseWire wedgeFailure   <- mkPulseWireOR;
+  Reg#(Bool) wedgeDetected <- mkConfigReg(False);
   Bool ensureFailure       =  List::any( \== (False), ensureBools);
   Bool invariantFailure    = (waitWire || !checkingEnabled) ? False
                            : List::any( \== (False),
@@ -1183,10 +1184,14 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
                           || failureReg;
   
   rule trackFailure;
-    if (resetFailure)
+    if (resetFailure) begin
       failureReg <= False;
-    else if (ensureFailure || invariantFailure || wedgeFailure)
+      wedgeDetected <= False;
+    end
+    else if (ensureFailure || invariantFailure || wedgeFailure) begin
+      if (wedgeFailure) wedgeDetected <= True;
       failureReg <= True;
+    end
   endrule
 
   // Timer
@@ -1261,9 +1266,8 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         actions[i];
         didFire.send;
       endrule
-      rule runActionNotPossible (actionsEnabled && inState[i] && !waitWire
-                                   && params.showNonFire);
-        if (verbose)
+      rule runActionNotPossible (actionsEnabled && inState[i] && !waitWire);
+        if (params.showNonFire && verbose)
           $display(timeInfo, "[did not fire] ", actionMsgs[i]);
       endrule
     end
@@ -1277,7 +1281,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
     else begin
       if (consecutiveNonFires == 10000)
         begin
-          if (verbose) $display("\nWedge detected\n");
+          if (verbose) $display("\nPossible wedge detected\n");
           consecutiveNonFires <= 0;
           wedgeFailure.send;
         end
@@ -1630,7 +1634,13 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
     seq
       // Initialise shrinker
       action
-        omitNum   <= 0;
+        if (wedgeDetected)
+          begin
+            $display("\nPossible wedge detected:");
+            omitNum <= counterExampleLen;
+          end
+        else
+          omitNum <= 0;
         deleteNum <= Invalid;
       endaction
 
