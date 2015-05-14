@@ -16,9 +16,6 @@ typedef struct {
   // Verbose output
   Bool verbose;
 
-  // Display message when a chosen state does not fire
-  Bool showNonFire;
-
   // Display message when a chosen state is a no-op
   Bool showNoOp;
 
@@ -775,6 +772,11 @@ function Integer sum(List#(Integer) xs);
   else return (List::head(xs) + sum(List::tail(xs)));
 endfunction
 
+// Decide whether or not to display an application.
+
+function Bool shouldDisplay(App app) =
+  app.name != "" && stringHead(app.name) != "_";
+
 // Sequence a list of statements.
 
 function Stmt seqList(Bool show, List#(Tuple2#(App, Stmt)) xs);
@@ -785,7 +787,9 @@ function Stmt seqList(Bool show, List#(Tuple2#(App, Stmt)) xs);
     let app = tpl_1(t);
     Stmt s  =
       seq
-        action if (show && app.name != "") $display(formatApp(app)); endaction
+        action
+          if (show && shouldDisplay(app)) $display(formatApp(app));
+        endaction
         tpl_2(t);
       endseq;
     return (seq s; seqList(show, List::tail(xs)); endseq);
@@ -1110,8 +1114,6 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   let prngItems      = concat(map(getPRNGItem, items));
   let actionApps     = map(tpl_2, actionItems);
   let stmtApps       = map(tpl_2, stmtItems);
-  let actionMsgs     = map(formatApp, actionApps);
-  let stmtMsgs       = map(formatApp, stmtApps);
   let actions        = map(tpl_3, actionItems);
   let stmts          = map(tpl_3, stmtItems);
   let ensureBools    = map(tpl_1, ensureItems);
@@ -1260,15 +1262,11 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   Integer numActions = length(actions);
   for (Integer i = 0; i < numActions; i=i+1)
     begin
-      (* preempts = "runAction, runActionNotPossible" *)
       rule runAction (actionsEnabled && inState[i] && !waitWire);
-        if (verbose) $display(timeInfo, actionMsgs[i]);
+        if (verbose && shouldDisplay(actionApps[i]))
+          $display(timeInfo, formatApp(actionApps[i]));
         actions[i];
         didFire.send;
-      endrule
-      rule runActionNotPossible (actionsEnabled && inState[i] && !waitWire);
-        if (params.showNonFire && verbose)
-          $display(timeInfo, "[did not fire] ", actionMsgs[i]);
       endrule
     end
 
@@ -1303,7 +1301,8 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
       FSM fsm <- mkFSMWithPred(stmts[i], actionsEnabled && inState[s]);
 
       rule runStmt (actionsEnabled && inState[s] && !fsmRunning);
-        if (verbose) $display(timeInfo, stmtMsgs[i]);
+        if (verbose && shouldDisplay(stmtApps[i]))
+          $display(timeInfo, formatApp(stmtApps[i]));
         fsm.start;
         fsmRunning <= True;
         waitWire.send;
@@ -1866,7 +1865,6 @@ endmodule
 BlueCheck_Params bcParams =
   BlueCheck_Params {
     verbose               : True
-  , showNonFire           : False
   , showNoOp              : False
   , showTime              : False
   , wedgeDetect           : False
@@ -1896,7 +1894,6 @@ function BlueCheck_Params bcParamsID(MakeResetIfc rst);
   BlueCheck_Params params =
     BlueCheck_Params {
       verbose               : False
-    , showNonFire           : False
     , showNoOp              : False
     , showTime              : True
     , wedgeDetect           : False
