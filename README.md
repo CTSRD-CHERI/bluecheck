@@ -1,11 +1,12 @@
 BlueCheck
 =========
 
-BlueCheck is a generic test-bench written in the Bluespec HDL.  It is
-generic in the sense that it can be used to test any design.
+BlueCheck is a *generic* test-bench written in the Bluespec HDL.  It
+is generic in the sense that it can be used to test any design.
 
-To use it, the developer simply provides specification of correctness:
-a set of properties, written in Bluespec, about the design under test.
+To use it, the developer simply provides a specification of
+correctness: a set of properties, written in Bluespec, about the
+design under test.
 
 BlueCheck then automatically tests these properties, reporting any
 counter-examples found.
@@ -32,4 +33,5 @@ It's main features are:
 
 Technical documentation will appear here shortly.  For now, take a
 look at the examples in [SimpleExamples.bsv](SimpleExamples.bsv) and
-[StackExample.bsv](StackExample.bsv).
+[StackExample.bsv](StackExample.bsv).  These can be built using
+[make.sh](make.sh).
