@@ -35,3 +35,9 @@ Technical documentation will appear here shortly.  For now, take a
 look at the examples in [SimpleExamples.bsv](SimpleExamples.bsv) and
 [StackExample.bsv](StackExample.bsv).  These can be built using
 [make.sh](make.sh).
+
+Acknowlegements
+===============
+
+For numerous vital suggestions, thanks to Alex Horsman, Alexandre
+Joannou, Theo Markettos, Simon Moore, and Jon Woodruff.
