@@ -37,7 +37,7 @@ look at the examples in [SimpleExamples.bsv](SimpleExamples.bsv) and
 [make.sh](make.sh).
 
 Acknowlegements
-===============
+---------------
 
 For numerous vital suggestions, thanks to Alex Horsman, Alexandre
 Joannou, Theo Markettos, Simon Moore, and Jon Woodruff.
