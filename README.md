@@ -1,14 +1,17 @@
 BlueCheck
 =========
 
+(Inpsired by the QuickCheck tool for testing Haskell programs.)
+
 BlueCheck is a *generic* test-bench written in the Bluespec HDL.  It
-is generic in the sense that it can be used to test *any* HDL module.
-It is inspired by the QuickCheck tool for testing Haskell programs.
+is generic in the sense that it can be used to test *any* design.
 
 To use it, the developer simply provides a specification of
 correctness: a set of properties, written in Bluespec, about the
-design under test.  BlueCheck then automatically tests these
-properties, reporting any counter-examples found.
+design under test.
+
+BlueCheck then automatically tests these properties, reporting any
+counter-examples found.
 
 It's main features are:
 
