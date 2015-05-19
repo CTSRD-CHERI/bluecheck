@@ -19,15 +19,16 @@ It's main features are:
     gradually over time with aim of finding simple failures first.
 
   * *Shrinking*: once a failing test-sequence is found, BlueCheck tries
-    to make it shorted by repeatedly ommitting possibly-unneeded
+    to make it shorter by repeatedly ommitting possibly-unneeded
     elements.  This helps find simple failures quickly.
 
   * *Fully synthesisable*: it can run on FPGA as well as in simulation,
-    allowing thorough testing.  Counter-examples found on FPGA can be
-    trasferred to a host PC to be viewed or replayed in simulation.
+    allowing thorough testing.  Counter-examples found on FPGA are
+    automatically trasferred to a host PC to be viewed or replayed
+    in simulation.
 
-  * *Ease of use*: rigourous test frameworks can be constructed by
-    writing a very small amount of code.
+  * *Ease of use*: rigourous HDL-level test frameworks can be
+    constructed by writing a very small amount of code.
 
 Technical documentation will appear here shortly.  For now, take a
 look at the examples in [SimpleExamples.bsv](SimpleExamples.bsv) and
