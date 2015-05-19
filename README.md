@@ -30,4 +30,5 @@ It's main features are:
     writing a very small amount of code.
 
 Technical documentation will appear here shortly.  For now, take a
-look at the examples in [SimpleExamples.bsv] and [StackExample.bsv].
+look at the examples in [SimpleExamples.bsv](SimpleExamples.bsv) and
+[StackExample.bsv](StackExample.bsv).
