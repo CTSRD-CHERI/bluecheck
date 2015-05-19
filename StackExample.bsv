@@ -10,6 +10,10 @@
  * Cambridge Computer Laboratory under DARPA/AFRL contract FA8750-11-C-0249
  * ("MRC2"), as part of the DARPA MRC research programme.
  *
+ * This software was developed by the University of Cambridge Computer
+ * Laboratory as part of the Rigorous Engineering of Mainstream
+ * Systems (REMS) project, funded by EPSRC grant EP/K008528/1.
+ *
  * @BERI_LICENSE_HEADER_START@
  *
  * Licensed to BERI Open Systems C.I.C. (BERI) under one or more contributor
