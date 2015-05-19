@@ -2,7 +2,7 @@ BlueCheck
 =========
 
 BlueCheck is a *generic* test-bench written in the Bluespec HDL.  It
-is generic in the sense that it can be used to test any design.
+is generic in the sense that it can be used to test *any* design.
 
 To use it, the developer simply provides a specification of
 correctness: a set of properties, written in Bluespec, about the
