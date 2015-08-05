@@ -1,4 +1,4 @@
-/* BlueCheck 2015-05-19
+/* BlueCheck 2015-08-05
  *
  * Copyright 2015 Matthew Naylor
  * All rights reserved.
@@ -41,6 +41,7 @@ import Clocks        :: *;
 import FIFOF         :: *;
 import ConfigReg     :: *;
 import Vector        :: *;
+import DReg          :: *;
 
 // ============================================================================
 // Module parameters
@@ -72,6 +73,11 @@ typedef struct {
   // Attempt to shrink a counter example, if one is found
   // (This is only valid when 'useIterativeDeepening' is true)
   Bool useShrinking;
+
+  // Allow recorded counter-examples to be viewed.  This is useful
+  // when testing on FPGA, and when behaviour on FPGA and in simulation
+  // is not equivalent.
+  Bool allowViewing;
 
   // Number of testing iterations to perform. For iterative deepening,
   // this is the number of times to increase the depth before stopping
@@ -207,14 +213,11 @@ function App appendArg(App app, Fmt arg) =
 // Psuedo-random number generation
 // ============================================================================
 
-// This is a slight variant of a standard 16-bit LCG.  The difference
-// is that it mutates the seed when the period has elapsed.  The aim
-// is to avoid synchronising with other LCGs that may exist, which
-// could lead to cycles.
+// This is a fairly standard 16-bit LCG.
 
 interface PRNG16;
   method Action seed(Bit#(32) s);
-  method Action next;
+  method Action stall;
   method Bit#(32) value;
   method Bit#(16) out;
 endinterface
@@ -225,13 +228,15 @@ module mkPRNG16 (PRNG16);
 
   // Signals from the methods to the following rule
   Wire#(Maybe#(Bit#(32))) seedWire <- mkDWire(Invalid);
-  PulseWire nextWire               <- mkPulseWire;
 
-  // The rule ('seed' takes priority over 'next')
+  // Stall the generator for the current cycle
+  PulseWire stallWire <- mkPulseWire;
+
+  // The rule ('seed' takes priority)
   rule step;
     if (seedWire matches tagged Valid .s)
       state <= s[30:0];
-    else if (nextWire)
+    else if (! stallWire)
       state <= state*1103515245 + 12345;
   endrule
 
@@ -246,10 +251,7 @@ module mkPRNG16 (PRNG16);
   // Obtain the current state
   method Bit#(32) value = {0, state};
 
-  // Generate a new psuedo-random number
-  method Action next;
-    nextWire.send;
-  endmethod
+  method Action stall = stallWire.send;
 endmodule
 
 // ============================================================================
@@ -286,9 +288,6 @@ module [BlueCheck] mkGenDefault (Gen#(t))
   // Generate a value using the PRNGs.
   method ActionValue#(t) gen;
     Bit#(n) x = 0;
-    for (Integer i = 0; i < numPRNGs; i=i+1)
-      prngs[i].next;
-
     Integer outer = 0;
     Integer inner = 0;
     for (Integer i = 0; i < valueOf(n); i=i+1) begin
@@ -851,6 +850,11 @@ endfunction
 // File I/O
 // ============================================================================
 
+function Action putNibble(File f, Bit#(4) data) =
+  action
+    $fwrite(f, "%c", hexEncode(data));
+  endaction;
+
 function Action putHalfWord(File f, Bit#(16) data) =
   action
     $fwrite(f, "%c", hexEncode(data[15:12]));
@@ -858,6 +862,12 @@ function Action putHalfWord(File f, Bit#(16) data) =
     $fwrite(f, "%c", hexEncode(data[7:4]));
     $fwrite(f, "%c", hexEncode(data[3:0]));
   endaction;
+
+function ActionValue#(Bit#(4)) getNibble(File f) =
+  actionvalue
+    int c <- $fgetc(f);
+    return hexDecode(pack(c)[7:0]);
+  endactionvalue;
 
 function ActionValue#(Bit#(16)) getHalfWord(File f) =
   actionvalue
@@ -1052,7 +1062,7 @@ endfunction
 // When shrinking is enabled, the length of the sequences generated
 // must be bounded.
 
-Integer maxSeqLen = 256;
+Integer maxSeqLen = 255;
 
 // ============================================================================
 // Communication from FPGA to host PC
@@ -1116,13 +1126,18 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   Reg#(Bool) resumeFlag <- mkReg(False);
   Reg#(Bool) resumed    <- mkReg(False);
 
+  // View counter-example (rather than replay it)
+  Reg#(Bool) viewFlag   <- mkReg(False);
+
   // True once command-line args have been read
   Reg#(Bool) gotPlusArgs <- mkReg(False);
 
   rule readPlusArgs (!gotPlusArgs);
     let b0 <- $test$plusargs("replay"); // For backwards-compatibility
     let b1 <- $test$plusargs("resume");
+    let b2 <- $test$plusargs("view");
     resumeFlag  <= b0 || b1;
+    viewFlag    <= b2;
     gotPlusArgs <= True;
   endrule
 
@@ -1184,6 +1199,9 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   Reg#(Bit#(32)) currentDepth <- mkReg(0);
   Reg#(Bool) prePostActive <- mkReg(False);
 
+  // Trigger display of property invocation in view mode
+  Reg#(Bool) triggerView  <- mkDReg(False);
+
   // Wedge detector: count consecutive non-firings
   Reg#(Bit#(16)) consecutiveNonFires <- mkReg(0);
 
@@ -1203,6 +1221,9 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
     delayedCount <= count;
   endrule
 
+  // Keep track of time of each property invocation
+  FIFOF#(Maybe#(Bit#(32))) timeFIFO <- mkSizedFIFOF(maxSeqLen+1);
+
   // Keep track of failures
   // ----------------------
 
@@ -1218,6 +1239,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
                           || invariantFailure
                           || wedgeFailure
                           || failureReg;
+  Bool shrinkingEnabled    = viewFlag ? False : params.useShrinking;
   
   rule trackFailure;
     if (resetFailure) begin
@@ -1303,6 +1325,11 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         actions[i];
         didFire.send;
       endrule
+
+      rule viewAction (triggerView && inState[i]);
+        if (shouldDisplay(actionApps[i]))
+          $display(timeInfo, formatApp(actionApps[i]));
+      endrule
     end
 
   // Wedge detector
@@ -1353,6 +1380,11 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         fsmRunning <= False;
         didFire.send;
       endrule
+
+      rule viewStmt (triggerView && inState[s]);
+        if (shouldDisplay(stmtApps[i]))
+          $display(timeInfo, formatApp(stmtApps[i]));
+      endrule
     end
 
   // Show classifications
@@ -1379,8 +1411,10 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   // Copy the value of each PRNG to the corresponding shadow register
 
   rule ruleSavePRNGs (savePRNGs);
-    function Bit#(32) f(PRNG16 x) = x.value;
-    shadows.store(List::map(f, prngs));
+    function Bit#(32) val(PRNG16 x) = x.value;
+    function Action stall(PRNG16 x) = x.stall;
+    shadows.store(List::map(val, prngs));
+    let _ <- List::mapM(stall, prngs);
   endrule
 
   // Copy the value of each shadow register the to corresponding PRNG
@@ -1419,6 +1453,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         iterCount <= 0;
       endaction
 
+      // Load PRNG seeds
       while (!loopDone)
         action
           let x <- getWord(seedFile);
@@ -1428,6 +1463,21 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
           iterCount <= iterCount+1;
           if (iterCount+1 == fromInteger(numPRNGs)) loopDone <= True;
         endaction
+
+      // Load time FIFO
+      if (viewFlag)
+        seq
+          loopDone <= False;
+          while (!loopDone)
+            action
+              let x <- getNibble(seedFile);
+              if (x != 0) begin
+                let t <- getWord(seedFile);
+                timeFIFO.enq(Valid(t));
+              end else
+                loopDone <= True;
+            endaction
+        endseq
 
       // Close file
       $fclose(seedFile);
@@ -1461,6 +1511,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         iterCount <= 0;
       endaction
 
+      // Emit PRNG seeds
       while (!loopDone)
         action
           let x <- shadows.get;
@@ -1471,6 +1522,26 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
           if (iterCount+1 == fromInteger(numPRNGs)) loopDone <= True;
         endaction
 
+      // Emit time FIFO (without destroying it)
+      action
+        loopDone <= False;
+        timeFIFO.enq(Invalid); // Null terminator
+      endaction
+      while (!loopDone)
+        action
+          timeFIFO.deq;
+          case (timeFIFO.first) matches
+            tagged Invalid: loopDone <= True;
+            tagged Valid .x:
+              action
+                timeFIFO.enq(Valid(x));
+                putNibble(seedFile, 1);
+                putWord(seedFile, x);
+              endaction
+          endcase
+        endaction
+      putNibble(seedFile, 0);
+
       // Close file
       $fclose(seedFile);
     endseq;
@@ -1479,6 +1550,24 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
 
   Reg#(Bit#(32)) tmpReg     <- mkReg(0);
   Reg#(Bit#(4)) nibbleCount <- mkReg(0);
+
+  function Action emitNibble(FIFOF#(Bit#(8)) fifo, Bit#(4) nibble) =
+    action
+      await(fifo.notFull);
+      fifo.enq(hexEncode(nibble));
+    endaction;
+
+  function Stmt emitWord(FIFOF#(Bit#(8)) fifo, Bit#(32) word) =
+    seq
+      action nibbleCount <= 0; tmpReg <= word; endaction
+      while (nibbleCount <= 7)
+        action
+          await(fifo.notFull);
+          fifo.enq(hexEncode(tmpReg[31:28]));
+          tmpReg <= tmpReg << 4;
+          nibbleCount <= nibbleCount+1;
+        endaction
+    endseq;
 
   function Stmt storeToFIFO(FIFOF#(Bit#(8)) fifo, Bit#(32) depth) =
     seq
@@ -1490,33 +1579,20 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         // Initialise
         loopDone <= False;
         iterCount <= 0;
-        nibbleCount <= 0;
-        tmpReg <= depth;
       endaction
 
-      while (nibbleCount <= 7)
-        action
-          await(fifo.notFull);
-          fifo.enq(hexEncode(tmpReg[31:28]));
-          tmpReg <= tmpReg << 4;
-          nibbleCount <= nibbleCount+1;
-        endaction
+      // Emit current depth
+      emitWord(fifo, depth);
 
+      // Emit PRNG seeds
       while (!loopDone)
         seq
           action
             let x <- shadows.get;
             tmpReg <= {0, x};
-            nibbleCount <= 0;
           endaction
 
-          while (nibbleCount <= 7)
-            action
-              await(fifo.notFull);
-              fifo.enq(hexEncode(tmpReg[31:28]));
-              tmpReg <= tmpReg << 4;
-              nibbleCount <= nibbleCount+1;
-            endaction
+          emitWord(fifo, tmpReg);
 
           action
             // Increment loop counter
@@ -1524,6 +1600,24 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
             if (iterCount+1 == fromInteger(numPRNGs)) loopDone <= True;
           endaction
         endseq
+
+      // Emit time FIFO
+      action
+        loopDone <= False;
+        timeFIFO.enq(Invalid); // Null terminator
+      endaction
+      while (!loopDone)
+        seq
+          if (isValid(timeFIFO.first)) seq
+            emitNibble(fifo, 1);
+            emitWord(fifo, fromMaybe(?, timeFIFO.first));
+            timeFIFO.enq(timeFIFO.first);
+          endseq else
+            loopDone <= True;
+          timeFIFO.deq;
+        endseq
+      emitNibble(fifo, 0);
+
     endseq;
 
   // Store the values of the shadow PRNGs to file or FIFO, depending
@@ -1559,7 +1653,6 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
       while (!testDone)
         action
           await(!waitWire);
-          stateGen.next;
           let nextState = bound(stateGen.out, numStates-1);
           if (failureFound)
             begin
@@ -1601,7 +1694,6 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   // ------------------------
 
   Reg#(Bit#(32)) counterExampleLen  <- mkReg(0);
-  FIFOF#(Maybe#(Bit#(32))) timeFIFO <- mkSizedFIFOF(maxSeqLen);
   Reg#(Bit#(32)) omitNum            <- mkReg(0);
   Reg#(Maybe#(Bit#(32))) deleteNum  <- mkReg(Invalid);
 
@@ -1650,7 +1742,6 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
             count <= count+1;
             state <= 0;
           end
-          stateGen.next;
         endaction
 
       action
@@ -1661,6 +1752,34 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
       prePostActive <= True;
       postStmt;
       prePostActive <= False;
+    endseq;
+
+  // Simply view a counter-example loaded from a file (i.e. don't replay it)
+  // -----------------------------------------------------------------------
+
+  Stmt view =
+    seq
+      // Initialisation
+      action
+        resetTimer   <= True;
+        resetFailure <= True;
+        state        <= 0;
+        restorePRNGs.send;
+      endaction
+
+      // Display test sequence
+      while (timeFIFO.notEmpty)
+        action
+          if (timeFIFO.first matches tagged Valid .t) begin
+            if (timer == t) begin
+              timeFIFO.deq;
+              triggerView <= True;
+              state <= bound(stateGen.out, numStates-1);
+            end
+          end
+        endaction
+
+      delay(1);
     endseq;
 
   // Shrink a counter-example
@@ -1727,8 +1846,8 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         resetFailure <= True;
         iterCount <= 0;
 
-        // When not using shrinking, enable output
-        if (! params.useShrinking) begin
+        // When not shrinking, enable output
+        if (! shrinkingEnabled) begin
           verbose <= True;
           let _ <- List::mapM(assignReg(True), ensureShows);
         end
@@ -1741,7 +1860,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
       while (!failureFound && iterCount < params.numIterations)
         seq
           // Check that the depth is OK
-          if (params.useShrinking &&
+          if ((shrinkingEnabled || params.allowViewing) &&
             currentDepth >= fromInteger(maxSeqLen)) seq
             $display("Max depth of %0d", maxSeqLen-1, " exceeded.");
             $display("Increase the 'maxSeqLen' parameter in BlueCheck.bsv.");
@@ -1763,7 +1882,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
                 counterExampleLen <= currentDepth;
                 resetTimer <= True;
                 state <= 0;
-                if (params.useShrinking) timeFIFO.clear;
+                if (shrinkingEnabled || params.allowViewing) timeFIFO.clear;
                 if (resumeFlag && !resumed)
                   begin restorePRNGs.send; resumed <= True; end
                 else
@@ -1782,9 +1901,8 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
                   // This action only fires when not waiting for a
                   // user-defined statement to finish.
                   await(!waitWire);
-                  stateGen.next;
                   let nextState = bound(stateGen.out, numStates-1);
-                  if (didFire && params.useShrinking)
+                  if (didFire && (shrinkingEnabled || params.allowViewing))
                     timeFIFO.enq(tagged Valid (startTime));
                   if (failureFound)
                     begin
@@ -1840,7 +1958,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
           showClassifications;
         endaction
       else seq
-        if (params.useShrinking)
+        if (shrinkingEnabled)
           shrink;
         else
           $display("\nFAILED: counter-example found");
@@ -1884,8 +2002,11 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   Stmt iterativeDeepeningTop =
     seq
       await(gotPlusArgs);
-      if (resumeFlag) loadFromFile;
-      iterativeDeepeningUI;
+      if (resumeFlag || viewFlag) loadFromFile;
+      if (viewFlag)
+        view;
+      else
+        iterativeDeepeningUI;
     endseq;
 
   // Result of module
@@ -1908,6 +2029,7 @@ BlueCheck_Params bcParams =
   , useIterativeDeepening : False
   , interactive           : False
   , useShrinking          : False
+  , allowViewing          : False
   , id                    : ?
   , numIterations         : 1000
   , outputFIFO            : Invalid
@@ -1937,6 +2059,7 @@ function BlueCheck_Params bcParamsID(MakeResetIfc rst);
     , useIterativeDeepening : True
     , interactive           : True
     , useShrinking          : True
+    , allowViewing          : True
     , id                    : idParams
     , numIterations         : 2
     , outputFIFO            : Invalid
@@ -1995,6 +2118,7 @@ module [Module] blueCheckIDSynth#( BlueCheck#(Empty) bc
   params.interactive   = False;
   params.outputFIFO    = tagged Valid out;
   params.useShrinking  = False;
+  params.allowViewing  = True;
   JtagUart uart       <- mkJtagUart(out);
   Stmt s              <- mkModelChecker(bc, params);
   mkAutoFSM(s);

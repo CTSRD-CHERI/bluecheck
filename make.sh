@@ -36,7 +36,8 @@
 
 BSC="bsc"
 BSCFLAGS="-keep-fires -cross-info -aggressive-conditions \
-          -wait-for-license -suppress-warnings G0043"
+          -wait-for-license -suppress-warnings G0043 \
+          -steps-warn-interval 300000"
 SUFFIXES=
 
 # Choose a top-level module from StackExamples.bsv
