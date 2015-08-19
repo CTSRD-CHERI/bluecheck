@@ -33,8 +33,10 @@ It's main features are:
   * *Ease of use*: rigourous HDL-level test frameworks can be
     constructed by writing a very small amount of code.
 
-Technical documentation will appear here shortly.  For now, take a
-look at the examples in [SimpleExamples.bsv](SimpleExamples.bsv) and
+A good place to start learning about BlueCheck is [this
+report](https://github.com/CTSRD-CHERI/bluecheck/raw/master/bluecheck.pdf).
+Also, take a look at the examples in
+[SimpleExamples.bsv](SimpleExamples.bsv) and
 [StackExample.bsv](StackExample.bsv).  These can be built using
 [make.sh](make.sh).
 
@@ -45,4 +47,5 @@ BlueCheck is inspired by the influential QuickCheck tool by Koen
 Claessen and John Hughes.
 
 For numerous vital suggestions, thanks to Alex Horsman, Alexandre
-Joannou, Theo Markettos, Simon Moore, and Jon Woodruff.
+Joannou, Theo Markettos, Simon Moore, Peter Sewell, Robert Watson, and
+Jon Woodruff.
