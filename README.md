@@ -34,7 +34,8 @@ It's main features are:
     constructed by writing a very small amount of code.
 
 A good place to start learning about BlueCheck is [this
-report](https://github.com/CTSRD-CHERI/bluecheck/raw/master/bluecheck.pdf).
+report](https://github.com/CTSRD-CHERI/bluecheck/raw/master/bluecheck.pdf)
+(Copyright IEEE).
 Also, take a look at the examples in
 [SimpleExamples.bsv](SimpleExamples.bsv) and
 [StackExample.bsv](StackExample.bsv).  These can be built using
