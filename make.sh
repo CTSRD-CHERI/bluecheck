@@ -40,32 +40,59 @@ BSCFLAGS="-keep-fires -cross-info -aggressive-conditions \
           -steps-warn-interval 300000"
 SUFFIXES=
 
-# Choose a top-level module from StackExamples.bsv
-# ================================================
+# UI
+# ==
 
-TOPFILE=StackExample.bsv
+echo "(1) Simple arithmetic properties"
+echo "(2) firstHot properties"
+echo "(3) Custom generator example"
+echo "(4) Stack"
+echo "(5) Stack + ID"
+echo "(6) Stack + ID + Classify"
+echo "(7) Stack(algebraic)"
+echo "(8) Stack(algebraic) + ID"
+echo "(9) Stack(synthesisable)"
+echo "(10) Stack(synthesisable) + ID"
 
-#TOPMOD=testStack
-TOPMOD=testStackID
-#TOPMOD=testStackIDClassify
-#TOPMOD=testStackAlg
-#TOPMOD=testStackAlgID
-
-# The following two modules are synthesisable
-# Uncomment SYNTH=1 to generate verilog instead of a simulator
-
-#SYNTH=1
-#TOPMOD=testStackSynth
-#TOPMOD=testStackIDSynth
-
-# Or, choose a top-level module from SimpleExamples.bsv
-# =====================================================
-
-#TOPFILE=PureExamples.bsv
-#TOPMOD=mkArithChecker
-#TOPMOD=mkFirstHotChecker
-#TOPMOD=mkCustomGenExample
-
+read OPTION
+case "$OPTION" in
+  1) TOPFILE=SimpleExamples.bsv
+     TOPMOD=mkArithChecker
+     ;;
+  2) TOPFILE=SimpleExamples.bsv
+     TOPMOD=mkFirstHotChecker
+     ;;
+  3) TOPFILE=SimpleExamples.bsv
+     TOPMOD=mkCustomGenExample
+     ;;
+  4) TOPFILE=StackExample.bsv
+     TOPMOD=testStack
+     ;;
+  5) TOPFILE=StackExample.bsv
+     TOPMOD=testStackID
+     ;;
+  6) TOPFILE=StackExample.bsv
+     TOPMOD=testStackIDClassify
+     ;;
+  7) TOPFILE=StackExample.bsv
+     TOPMOD=testStackAlg
+     ;;
+  8) TOPFILE=StackExample.bsv
+     TOPMOD=testStackAlgID
+     ;;
+  9) TOPFILE=StackExample.bsv
+     TOPMOD=testStack
+     SYNTH=1
+     ;;
+ 10) TOPFILE=StackExample.bsv
+     TOPMOD=testStackID
+     SYNTH=1
+     ;;
+  *) echo "Option not recognised"
+     exit
+     ;;
+esac
+  
 # Build it
 # ========
 
