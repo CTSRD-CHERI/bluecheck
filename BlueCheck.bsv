@@ -1,6 +1,6 @@
-/* BlueCheck 2015-08-05
+/* BlueCheck 2015-09-17
  *
- * Copyright 2015 Matthew Naylor
+ * Copyright 2015 Matthew Naylor, Nirav Dave
  * All rights reserved.
  *
  * This software was developed by SRI International and the University of
@@ -275,28 +275,21 @@ module [BlueCheck] mkGenDefault (Gen#(t))
 
   // Create as many 16-bit PRNGs as needed.
   PRNG16 prngs[numPRNGs];
-  List#(PRNG16) list = Nil;
+  List#(PRNG16) prnglist = Nil;
   for (Integer i = 0; i < numPRNGs; i=i+1) begin
     let prng <- mkPRNG16;
     prngs[i] = prng;
-    list     = Cons(prng, list);
+    prnglist = Cons(prng, prnglist);
   end
 
   // Expose these PRNGs to BlueCheck (which will seed them).
-  addToCollection(tagged PRNGItem list);
+  addToCollection(tagged PRNGItem prnglist);
 
   // Generate a value using the PRNGs.
   method ActionValue#(t) gen;
     Bit#(n) x = 0;
-    Integer outer = 0;
-    Integer inner = 0;
-    for (Integer i = 0; i < valueOf(n); i=i+1) begin
-      x[i] = prngs[outer].out[inner];
-      if (inner == 15) begin
-        outer = outer+1;
-        inner = 0;
-      end else
-        inner = inner+1; 
+    for (Integer i = 0; i < numPRNGs; i=i+1) begin
+      x = truncate({x,prngs[i].out});
     end
     return unpack(x);
   endmethod
