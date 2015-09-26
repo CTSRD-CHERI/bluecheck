@@ -4,18 +4,18 @@ BlueCheck
 (Inspired by the QuickCheck tool for testing Haskell programs.)
 
 BlueCheck is a *generic* test-bench written in the Bluespec HDL.  It
-is generic in the sense that it can be used to test *any* design.
+is generic in the sense that it can be applied to *any* Bluespec module.
 
 To use it, the developer simply provides a specification of
 correctness: a set of properties, written in Bluespec, about the
-design under test.
+module under test.
 
 BlueCheck then automatically tests these properties, reporting any
 counter-examples found.
 
 It's main features are:
 
-  * *Automatic test-sequence generation*, with support for definining
+  * *Automatic test-sequence generation*, with support for defining
     custom generators when the default one doesn't suffice.
 
   * *Iterative-deepening*: the lengths of test-sequences are increased
@@ -35,7 +35,8 @@ It's main features are:
 
 A good place to start learning about BlueCheck is [this
 report](https://github.com/CTSRD-CHERI/bluecheck/raw/master/bluecheck.pdf)
-(Copyright IEEE).
+(Copyright IEEE, presented at MEMOCODE 2015, [slides
+here](https://github.com/CTSRD-CHERI/bluecheck/raw/master/slides.pdf)).
 Also, take a look at the examples in
 [SimpleExamples.bsv](SimpleExamples.bsv) and
 [StackExample.bsv](StackExample.bsv).  These can be built using
@@ -47,6 +48,6 @@ Acknowlegements
 BlueCheck is inspired by the influential QuickCheck tool by Koen
 Claessen and John Hughes.
 
-For numerous vital suggestions, thanks to Alex Horsman, Alexandre
-Joannou, Theo Markettos, Simon Moore, Peter Sewell, Robert Watson, and
-Jon Woodruff.
+For numerous vital suggestions, thanks to Nirav Dave, Alex Horsman,
+Alexandre Joannou, Theo Markettos, Simon Moore, Peter Sewell, Robert
+Watson, and Jon Woodruff.
