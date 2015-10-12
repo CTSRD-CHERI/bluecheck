@@ -1,4 +1,4 @@
-/* BlueCheck 2015-09-17
+/* BlueCheck 2015-10-12
  *
  * Copyright 2015 Matthew Naylor, Nirav Dave
  * All rights reserved.
@@ -2033,13 +2033,13 @@ BlueCheck_Params bcParams =
 // ============================================================================
 
 function BlueCheck_Params bcParamsID(MakeResetIfc rst);
-  function incDepth(x) = x+10;
+  function incDepth(x) = x+1;
 
   ID_Params idParams =
     ID_Params {
       rst           : rst
-    , initialDepth  : 20
-    , testsPerDepth : 10000
+    , initialDepth  : 3
+    , testsPerDepth : 100
     , incDepth      : incDepth
     };
 
@@ -2054,7 +2054,7 @@ function BlueCheck_Params bcParamsID(MakeResetIfc rst);
     , useShrinking          : True
     , allowViewing          : True
     , id                    : idParams
-    , numIterations         : 2
+    , numIterations         : 20
     , outputFIFO            : Invalid
     };
 
