@@ -48,9 +48,6 @@ import DReg          :: *;
 // ============================================================================
 
 typedef struct {
-  // Verbose output
-  Bool verbose;
-
   // Display message when a chosen state is a no-op
   Bool showNoOp;
 
@@ -59,6 +56,9 @@ typedef struct {
 
   // Is the wedge-detector enabled?
   Bool wedgeDetect;
+
+  // Timeout before a wedge is assumed
+  Integer wedgeTimeout;
 
   // Generate a checker based on an iterative deepening strategy
   // (If 'False', a single random state walk is performed)
@@ -1122,6 +1122,9 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   // View counter-example (rather than replay it)
   Reg#(Bool) viewFlag   <- mkReg(False);
 
+  // Chatty mode (display more output)
+  Reg#(Bool) chatty     <- mkReg(False);
+
   // True once command-line args have been read
   Reg#(Bool) gotPlusArgs <- mkReg(False);
 
@@ -1129,13 +1132,15 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
     let b0 <- $test$plusargs("replay"); // For backwards-compatibility
     let b1 <- $test$plusargs("resume");
     let b2 <- $test$plusargs("view");
+    let b3 <- $test$plusargs("chatty");
     resumeFlag  <= b0 || b1;
     viewFlag    <= b2;
+    chatty      <= b3;
     gotPlusArgs <= True;
   endrule
 
   // Enable/disable display statements
-  Reg#(Bool) verbose      <- mkReg(params.verbose);
+  Reg#(Bool) verbose      <- mkReg(False);
 
   // Extract items from BlueCheck collection
   // ---------------------------------------
@@ -1333,7 +1338,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
       if (didFire)
         consecutiveNonFires <= 0;
       else begin
-        if (consecutiveNonFires == 10000)
+        if (consecutiveNonFires == fromInteger(params.wedgeTimeout))
           begin
             if (verbose) $display("\nPossible wedge detected\n");
             consecutiveNonFires <= 0;
@@ -1633,6 +1638,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         await(seeded);
         testDone   <= False;
         resetTimer <= True;
+        verbose    <= True;
 
         // Show 'ensure' failure messages?
         let _ <- List::mapM(assignReg(True), ensureShows);
@@ -1820,8 +1826,8 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
 
       // Restore original settings
       action
-        verbose <= params.verbose;
-        let _ <- List::mapM(assignReg(params.verbose), ensureShows);
+        verbose <= chatty;
+        let _ <- List::mapM(assignReg(chatty), ensureShows);
       endaction
     endseq;
 
@@ -1967,7 +1973,8 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
     seq
       action
         // Show ensure-failure messages?
-        let _ <- List::mapM(assignReg(params.verbose), ensureShows);
+        verbose <= chatty;
+        let _ <- List::mapM(assignReg(chatty), ensureShows);
       endaction
 
       // Initialise the random generators
@@ -2015,10 +2022,10 @@ endmodule
 
 BlueCheck_Params bcParams =
   BlueCheck_Params {
-    verbose               : True
-  , showNoOp              : False
+    showNoOp              : False
   , showTime              : False
   , wedgeDetect           : False
+  , wedgeTimeout          : 10000
   , useIterativeDeepening : False
   , interactive           : False
   , useShrinking          : False
@@ -2045,10 +2052,10 @@ function BlueCheck_Params bcParamsID(MakeResetIfc rst);
 
   BlueCheck_Params params =
     BlueCheck_Params {
-      verbose               : False
-    , showNoOp              : False
+      showNoOp              : False
     , showTime              : True
-    , wedgeDetect           : False
+    , wedgeDetect           : True
+    , wedgeTimeout          : 10000
     , useIterativeDeepening : True
     , interactive           : True
     , useShrinking          : True
