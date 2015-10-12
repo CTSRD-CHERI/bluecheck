@@ -22,15 +22,15 @@ It's main features are:
     gradually over time with aim of finding simple failures first.
 
   * *Shrinking*: once a failing test-sequence is found, BlueCheck tries
-    to make it shorter by repeatedly ommitting possibly-unneeded
+    to make it shorter by repeatedly omitting possibly-unneeded
     elements.  This helps find simple failures quickly.
 
   * *Fully synthesisable*: it can run on FPGA as well as in simulation,
     allowing thorough testing.  Counter-examples found on FPGA are
-    automatically trasferred to a host PC to be viewed or replayed
+    automatically transferred to a host PC to be viewed or replayed
     in simulation.
 
-  * *Ease of use*: rigourous HDL-level test frameworks can be
+  * *Ease of use*: rigorous HDL-level test frameworks can be
     constructed by writing a very small amount of code.
 
 There is various documentation about BlueCheck:
@@ -42,11 +42,11 @@ There is various documentation about BlueCheck:
 * Examples in
 [SimpleExamples.bsv](SimpleExamples.bsv) and
 [StackExample.bsv](StackExample.bsv): these can be built using
-[make.sh](make.sh).
+[make.sh](make.sh);
 
 * Frequently Asked Questions: [pdf](https://github.com/CTSRD-CHERI/bluecheck/raw/master/FAQ.pdf)
 
-Acknowlegements
+Acknowledgements
 ---------------
 
 BlueCheck is inspired by the influential QuickCheck tool by Koen
