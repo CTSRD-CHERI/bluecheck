@@ -53,6 +53,7 @@ echo "(7) Stack(algebraic)"
 echo "(8) Stack(algebraic) + ID"
 echo "(9) Stack(synthesisable)"
 echo "(10) Stack(synthesisable) + ID"
+echo "(11) Stack + ID + custom parameters"
 
 read OPTION
 case "$OPTION" in
@@ -87,6 +88,9 @@ case "$OPTION" in
  10) TOPFILE=StackExample.bsv
      TOPMOD=testStackID
      SYNTH=1
+     ;;
+ 11) TOPFILE=StackExample.bsv
+     TOPMOD=testStackIDCustom
      ;;
   *) echo "Option not recognised"
      exit

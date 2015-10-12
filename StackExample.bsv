@@ -248,6 +248,25 @@ module [Module] testStackID ();
   blueCheckID(checkStackWithReset(r.new_rst), r);
 endmodule
 
+// Iterative deepening version (with extra options)
+module [Module] testStackIDCustom ();
+  Clock clk <- exposeCurrentClock;
+  MakeResetIfc r <- mkReset(0, True, clk);
+
+  // Customise default BlueCheck parameters
+  BlueCheck_Params params = bcParamsID(r);
+  params.wedgeDetect      = True;
+  params.id.initialDepth  = 3;
+  function incr(x)        = x+1;
+  params.id.incDepth      = incr;
+  params.numIterations    = 25;
+  params.id.testsPerDepth = 100;
+
+  // Generate checker
+  Stmt s <- mkModelChecker(checkStackWithReset(r.new_rst), params);
+  mkAutoFSM(s);
+endmodule
+
 // Iterative deepening version & classification
 module [Module] testStackIDClassify ();
   Clock clk <- exposeCurrentClock;
