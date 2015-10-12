@@ -33,14 +33,18 @@ It's main features are:
   * *Ease of use*: rigourous HDL-level test frameworks can be
     constructed by writing a very small amount of code.
 
-A good place to start learning about BlueCheck is [this
-report](https://github.com/CTSRD-CHERI/bluecheck/raw/master/bluecheck.pdf)
-(Copyright IEEE, presented at MEMOCODE 2015, [slides
-here](https://github.com/CTSRD-CHERI/bluecheck/raw/master/slides.pdf)).
-Also, take a look at the examples in
+There is various documentation about BlueCheck:
+
+* MEMOCODE 2015 paper, Copyright IEEE: [pdf](https://github.com/CTSRD-CHERI/bluecheck/raw/master/bluecheck.pdf);
+
+* MEMOCODE 2015 slides: [pdf](https://github.com/CTSRD-CHERI/bluecheck/raw/master/slides.pdf);
+
+* Examples in
 [SimpleExamples.bsv](SimpleExamples.bsv) and
-[StackExample.bsv](StackExample.bsv).  These can be built using
+[StackExample.bsv](StackExample.bsv): these can be built using
 [make.sh](make.sh).
+
+* Frequently Asked Questions: [pdf](https://github.com/CTSRD-CHERI/bluecheck/raw/master/FAQ.pdf)
 
 Acknowlegements
 ---------------
