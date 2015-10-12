@@ -9,16 +9,20 @@ command-line option.
 ### 2. Is iterative-deepening/shrinking ever undesirable?
 
 Yes, if the design-under-test does not properly reset to a consistent
-state when its reset signal is asserted.  Consequently,
-iterative-deepening and shrinking could give false counter-examples.
-In such cases, the `blueCheck` test bench should be used, not
-`blueCheckID`.
+state when its reset signal is asserted, possibly resulting in false
+counter-examples.  For more details, see the section about resettable
+specifications in Section II(E) of the paper.  In such cases, the
+`blueCheck` test bench should be used, not `blueCheckID`.  
 
 Alternatively, the design-under-test should be modified to reset
-properly.  For more details, see the section about resettable
-specifications in Section II(E) of the paper.  Examples of components
-that do not reset "by themselves" are: `mkRegU` (make uninitialised
-register), and `mkRegFile` (make uninitialised register file).
+itself properly.   Examples of components that do not reset "by
+themselves" are: `mkRegU` (make uninitialised register), and
+`mkRegFile` (make uninitialised register file).  If the behaviour of a
+module can be affected by changing the initial contents of a register
+file, then that module needs to be modified to initialise the contents
+explicitly.  This can be done by adding an initialisation rule to the
+module or using a BlueCheck `pre` function to establish some initial
+state before each test-sequence.
 
 ### 3. Can I replay counter-examples found on a previous run?
 
@@ -43,8 +47,8 @@ See answer to Question 2.
 ### 5. Is BlueCheck configurable at all?
 
 BlueCheck is configurable in various ways using the `BlueCheck_Params`
-structure.  See `BlueCheck.bsv` for details of this structure and
-`testStackIDCustom` in `StackExamples.bsv` for an example of
+structure.  See `BlueCheck.bsv` for details of this structure and the
+`testStackIDCustom` module in `StackExamples.bsv` for an example of
 how to configure the structure.  Note that not all combinations of
 configuration options are supported, e.g. shrinking is only possible
 in iterative-deepening mode.
