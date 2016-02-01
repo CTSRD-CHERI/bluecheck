@@ -62,7 +62,7 @@ simple wedges.  However, Andy Wright has a fork of BlueCheck
 ### 7. How are values for an `enum` or `tagged union` type generated?
 
 By generating a random bit-string and applying it to the
-`pack` function.
+`unpack` function.
 
 As Andy Wright pointed out to me: "Be careful using the default RNG
 for enumerations where the number of elements is not a power of two.
