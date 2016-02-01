@@ -54,3 +54,5 @@ BlueCheck is inspired by QuickCheck by Koen Claessen and John Hughes.
 For helpful suggestions, thanks to Nirav Dave, Alex Horsman, Alexandre
 Joannou, Theo Markettos, Simon Moore, Peter Sewell, Robert Watson, Jon
 Woodruff, and Andy Wright.
+
+For code contributions, thanks to Nirav Dave and Andy Wright.
