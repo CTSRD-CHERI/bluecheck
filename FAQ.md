@@ -17,7 +17,7 @@ specifications in Section II(E) of the paper.  In such cases, the
 Alternatively, the design-under-test should be modified to reset
 itself properly.   Examples of components that do not reset "by
 themselves" are: `mkRegU` (make uninitialised register), and
-`mkRegFile` (make uninitialised register file).  If the behaviour of a
+`mkRegFile` (make uninitialised register file).  If the correctnesss of a
 module can be affected by changing the initial contents of a register
 file, then that module needs to be modified to initialise the contents
 explicitly.  This can be done by adding an initialisation rule to the
@@ -56,4 +56,20 @@ in iterative-deepening mode.
 ### 6. Does shrinking work with wedge failures?
 
 No. Iterative-deepening, on the other hand, is ideal for finding
-simple wedges.
+simple wedges.  However, Andy Wright has a fork of BlueCheck
+(`acw1251` on github) which does support this feature.
+
+### 7. How are values for an `enum` or `tagged union` type generated?
+
+By generating a random bit-string and applying it to the
+`pack` function.
+
+As Andy Wright pointed out to me: "Be careful using the default RNG
+for enumerations where the number of elements is not a power of two.
+The RNG will produce random values that are not actually elements in
+the enumeration. This can be very confusing because if you are
+deriving `FShow` to print the names of the elements, it will have a
+name that makes it look like it some element in the enumeration, but
+when you use the `==` operator from deriving `Eq`, it will not match
+that element. Instead you can derive `Bounded` for the enumeration and
+use an RNG that uses the `Bounded` typeclass."

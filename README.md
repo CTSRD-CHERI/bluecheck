@@ -49,9 +49,8 @@ There is various documentation about BlueCheck:
 Acknowledgements
 ---------------
 
-BlueCheck is inspired by the influential QuickCheck tool by Koen
-Claessen and John Hughes.
+BlueCheck is inspired by QuickCheck by Koen Claessen and John Hughes.
 
-For numerous vital suggestions, thanks to Nirav Dave, Alex Horsman,
-Alexandre Joannou, Theo Markettos, Simon Moore, Peter Sewell, Robert
-Watson, and Jon Woodruff.
+For helpful suggestions, thanks to Nirav Dave, Alex Horsman, Alexandre
+Joannou, Theo Markettos, Simon Moore, Peter Sewell, Robert Watson, Jon
+Woodruff, and Andy Wright.
