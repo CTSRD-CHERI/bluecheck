@@ -470,8 +470,14 @@ endinstance
 
 instance Prop#(Bool);
   module [BlueCheck] addProp#(Freq freq, App app, Bool b) ();
+    // This wire will relax scheduling constraints in case the boolean came
+    // from a guarded method
+    Wire#(Bool) success <- mkDWire(True);
+    rule check;
+      success <= b;
+    endrule
     Fmt msg = $format(formatApp(app), "\nProperty does not hold");
-    addToCollection(tagged InvariantItem (tuple2(msg, b)));
+    addToCollection(tagged InvariantItem (tuple2(msg, success)));
   endmodule
 endinstance
 
