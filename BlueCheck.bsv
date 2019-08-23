@@ -1191,26 +1191,25 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
 
   PulseWire restorePRNGs  <- mkPulseWire;
 
-  Integer numRandomGens = length(randomGens);
-  for (Integer i = 0; i < numRandomGens; i=i+1)
-    begin
-      rule genRandomData (seeded && !waitWire && !prePostActive);
-        randomGens[i];
-        let r <- getRandom();
-        rstate <= r;
-        if (loadSeedWire matches tagged Valid .s) begin
-          savedSeed <= s;
-        end else if (doSetSeed) begin
-          savedSeed <= seed;
-          setSeed(seed);
-        end else if (restorePRNGs) begin
-          seed <= savedSeed;
-          setSeed(savedSeed);
-        end else if (incSeed) begin
-          seed <= seed+1;
-        end
-      endrule
+  rule genRandomData (seeded && !waitWire && !prePostActive);
+    Integer numRandomGens = length(randomGens);
+    // TODO: good idea to call all randomGens in single rule?
+    // What if one of the random generators has blocking behaviour?
+    for (Integer i = 0; i < numRandomGens; i=i+1) randomGens[i];
+    let r <- getRandom();
+    rstate <= r;
+    if (loadSeedWire matches tagged Valid .s) begin
+      savedSeed <= s;
+    end else if (doSetSeed) begin
+      savedSeed <= seed;
+      setSeed(seed);
+    end else if (restorePRNGs) begin
+      seed <= savedSeed;
+      setSeed(savedSeed);
+    end else if (incSeed) begin
+      seed <= seed+1;
     end
+  endrule
 
   // Rule to check 'ensure' assertions
   // ---------------------------------
