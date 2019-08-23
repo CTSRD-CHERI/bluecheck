@@ -40,6 +40,12 @@ BSCFLAGS="-keep-fires -cross-info -aggressive-conditions \
           -steps-warn-interval 300000"
 SUFFIXES=
 
+# XXX Bluespec is not compatible with gcc > 4.9
+# XXX This is actually problematic when using
+#     $test$plusargs/strings or something?
+CC=gcc-4.8
+CXX=g++-4.8
+
 # UI
 # ==
 
@@ -107,7 +113,7 @@ then
 else
   if $BSC $BSCFLAGS -sim -g $TOPMOD -u $TOPFILE
   then
-    if $BSC $BSCFLAGS -sim -o $TOPMOD -e $TOPMOD  $TOPMOD.ba
+    if CC=$CC CXX=$CXX $BSC $BSCFLAGS -sim -o $TOPMOD -e $TOPMOD $TOPMOD.ba random.c
     then
         ./$TOPMOD
     else

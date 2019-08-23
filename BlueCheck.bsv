@@ -1,4 +1,6 @@
-/* BlueCheck 2016-02-01
+/* BlueCheck 2019-08-23
+ * (This is an experimental simulation-only version with external,
+ * sequential random number generation)
  *
  * Copyright 2015 Matthew Naylor
  * Copyright 2015 Nirav Dave
@@ -108,6 +110,13 @@ typedef struct {
 } ID_Params;
 
 // ============================================================================
+// External calls to random number generator
+// ============================================================================
+
+import "BDPI" function Action setSeed(Bit#(32) seed);
+import "BDPI" function ActionValue#(Bit#(32)) getRandom();
+
+// ============================================================================
 // States of the BlueCheck-generated checker
 // ============================================================================
 
@@ -116,7 +125,7 @@ typedef struct {
 // is not big enough, but it's not likely, unless you use very
 // large method frequencies.
 
-typedef 16 LogMaxStates;
+typedef 32 LogMaxStates;
 typedef Bit#(LogMaxStates) State;
 
 // The frequency that the checker will move to particular state.
@@ -157,7 +166,6 @@ typedef union tagged {
   Tuple3#(Freq, App, GuardedStmt) StmtItem;
   Tuple2#(Freq, List#(String)) ParItem;
   Action GenItem;
-  List#(PRNG16) PRNGItem;
   Tuple2#(Fmt, Bool) InvariantItem;
   Tuple2#(Bool, Reg#(Bool)) EnsureItem;
   Tuple2#(App, Stmt) PreStmtItem;
@@ -180,9 +188,6 @@ function List#(Tuple2#(Freq, List#(String))) getParItem(Item item) =
 
 function List#(Action) getGenItem(Item item) =
   item matches tagged GenItem .x ? single(x) : Nil;
-
-function List#(PRNG16) getPRNGItem(Item item) =
-  item matches tagged PRNGItem .xs ? xs : Nil;
 
 function List#(Tuple2#(Fmt, Bool)) getInvariantItem(Item item) =
   item matches tagged InvariantItem .x ? single(x) : Nil;
@@ -229,51 +234,6 @@ function App appendArg(App app, Fmt arg) =
   App { name: app.name, args: List::append(app.args, Cons(arg, Nil)) };
 
 // ============================================================================
-// Psuedo-random number generation
-// ============================================================================
-
-// This is a fairly standard 16-bit LCG.
-
-interface PRNG16;
-  method Action seed(Bit#(32) s);
-  method Action stall;
-  method Bit#(32) value;
-  method Bit#(16) out;
-endinterface
-
-module mkPRNG16 (PRNG16);
-  // State of the generator
-  Reg#(Bit#(31)) state <- mkReg(0);
-
-  // Signals from the methods to the following rule
-  Wire#(Maybe#(Bit#(32))) seedWire <- mkDWire(Invalid);
-
-  // Stall the generator for the current cycle
-  PulseWire stallWire <- mkPulseWire;
-
-  // The rule ('seed' takes priority)
-  rule step;
-    if (seedWire matches tagged Valid .s)
-      state <= s[30:0];
-    else if (! stallWire)
-      state <= state*1103515245 + 12345;
-  endrule
-
-  // Set the seed
-  method Action seed(Bit#(32) s);
-    seedWire <= tagged Valid s;
-  endmethod
-
-  // Output to use as psuedo-random number
-  method Bit#(16) out = reverseBits(state[30:15]);
-
-  // Obtain the current state
-  method Bit#(32) value = {0, state};
-
-  method Action stall = stallWire.send;
-endmodule
-
-// ============================================================================
 // Generators
 // ============================================================================
 
@@ -283,32 +243,19 @@ interface Gen#(type t);
   method ActionValue#(t) gen;
 endinterface
 
-// The following standard generator works for any type in Bits and
-// uses PRNGs to give psuedo-random data.
-
-module [BlueCheck] mkGenDefault (Gen#(t))
+// The following standard generator works for any type in Bits
+module mkGenDefault (Gen#(t))
   provisos (Bits#(t, n));
  
-  // Number of 16-bit PRNGs needed.
-  Integer numPRNGs = (valueOf(n)+15)/16;
-
-  // Create as many 16-bit PRNGs as needed.
-  PRNG16 prngs[numPRNGs];
-  List#(PRNG16) prnglist = Nil;
-  for (Integer i = 0; i < numPRNGs; i=i+1) begin
-    let prng <- mkPRNG16;
-    prngs[i] = prng;
-    prnglist = Cons(prng, prnglist);
-  end
-
-  // Expose these PRNGs to BlueCheck (which will seed them).
-  addToCollection(tagged PRNGItem prnglist);
+  // Number of 32-bit numbers needed.
+  Integer n = (valueOf(n)+31)/32;
 
   // Generate a value using the PRNGs.
   method ActionValue#(t) gen;
     Bit#(n) x = 0;
-    for (Integer i = 0; i < numPRNGs; i=i+1) begin
-      x = truncate({x,prngs[i].out});
+    for (Integer i = 0; i < n; i=i+1) begin
+      Bit#(32) r <- getRandom();
+      x = truncate({x,r});
     end
     return unpack(x);
   endmethod
@@ -940,89 +887,6 @@ function ActionValue#(Bit#(32)) getWord(File f) =
 String filename = "State.txt";
 
 // ============================================================================
-// Rotating Queue
-// ============================================================================
-
-// Each PRNG has a 'shadow register'.  These shadow registers can be
-// used to save or restore the state of all the PRNGs.  Since we want
-// to be able to easily serialise this state, for transfer to a file
-// or over a UART, we using the following rotating queue structure.
-
-// A rotating queue is a list of registers with support for:
-//   * inserting (by rotation) an element at one end
-//   * reading (by rotation) an element from the other end
-//   * loading and storing the values of all the registers
-
-interface RotatingQueue#(type t);
-  method Action put(t in);
-  method ActionValue#(t) get;
-  method List#(t) load;
-  method Action store(List#(t) inputs);
-endinterface
-
-module [Module] mkRotatingQueue#(Integer size) (RotatingQueue#(t))
-                  provisos (Bits#(t, n));
-
-  // Registers
-  // ---------
-
-  List#(Reg#(t)) regs <- List::replicateM(size, mkRegU);
-
-  // Wires
-  // -----
-
-  Wire#(Bool)        rotWire  <- mkDWire(False);
-  Wire#(Maybe#(t))   putWire  <- mkDWire(Invalid);
-  Wire#(Bool)        loadWire <- mkDWire(False);
-  List#(Wire#(t))    loadVals <- List::replicateM(size, mkDWire(?));
-
-  // Rules
-  // -----
-
-  rule rotate (rotWire || loadWire);
-    t insert;
-    if (putWire matches tagged Valid .x)
-      insert = x;
-    else
-      insert = readReg(List::last(regs));
-
-    List#(Reg#(t))  rs = regs;
-    List#(Wire#(t)) vs = loadVals;
-    for (Integer i = 0; i < size; i=i+1) begin
-      if (loadWire)
-        rs[0] <= vs[0];
-      else
-        rs[0] <= insert;
-      insert = rs[0];
-      rs     = List::tail(rs);
-      vs     = List::tail(vs);
-    end
-  endrule
-
-  // Methods
-  // -------
-
-  method Action put(t x);
-    putWire <= tagged Valid x;
-    rotWire <= True;
-  endmethod
-
-  method ActionValue#(t) get;
-    rotWire <= True;
-    return readReg(List::last(regs));
-  endmethod
-
-  method List#(t) load = List::map(readReg, regs);
-
-  method Action store(List#(t) inputs);
-    function Action f(Wire#(t) w, t x) = action w <= x; endaction;
-    let _ <- List::zipWithM(f, loadVals, inputs);
-    loadWire <= True;
-  endmethod
-
-endmodule
-
-// ============================================================================
 // State conditions
 // ============================================================================
 
@@ -1204,7 +1068,6 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   let classifyItems  = concat(map(getClassifyItem, items));
   let preStmt        = seqList(verbose, concat(map(getPreStmtItem, items)));
   let postStmt       = seqList(verbose, concat(map(getPostStmtItem, items)));
-  let prngItems      = concat(map(getPRNGItem, items));
   let actionApps     = map(tpl_2, actionItems);
   let stmtApps       = map(tpl_2, stmtItems);
   let actions        = map(tpl_3, actionItems);
@@ -1227,10 +1090,8 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   List#(Integer) allFreqs =  append(freqs, parFreqs);
   Integer sumFreqs        =  sum(freqs);
   Integer numStates       =  1+sumFreqs+sum(parFreqs);
-  PRNG16 stateGen         <- mkPRNG16;
-  List#(PRNG16) prngs     =  Cons(stateGen, prngItems);
-  Integer numPRNGs        =  List::length(prngs);
   ConfigReg#(State) state <- mkConfigReg(0);
+  ConfigReg#(State) rstate <- mkConfigReg(0);
   PulseWire waitWire      <- mkPulseWireOR;
   PulseWire didFire       <- mkPulseWireOR;
   Reg#(Bool) testDone     <- mkReg(False);
@@ -1313,26 +1174,41 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   // Seed the random generators
   // --------------------------
 
-  Reg#(Bool) seeded <- mkReg(False);
+  Reg#(Bit#(32)) seed <- mkConfigReg(0);
+  Reg#(Bit#(32)) savedSeed <- mkConfigReg(0);
+  PulseWire incSeed <- mkPulseWireOR;
+  PulseWire doSetSeed <- mkPulseWire;
+  Wire#(Maybe#(Bit#(32))) loadSeedWire <- mkDWire(Invalid);
+  Reg#(Bool) seeded <- mkConfigReg(False);
 
   rule seedPRNGs (!seeded);
-    for (Integer i = 0; i < numPRNGs; i=i+1)
-      prngs[i].seed(fromInteger(i+1));
+    setSeed(0);
     seeded <= True;
   endrule
 
   // Generate rules to generate random data
   // --------------------------------------
 
-  PulseWire savePRNGs     <- mkPulseWire;
   PulseWire restorePRNGs  <- mkPulseWire;
 
   Integer numRandomGens = length(randomGens);
   for (Integer i = 0; i < numRandomGens; i=i+1)
     begin
-      rule genRandomData (seeded && !waitWire && !prePostActive
-                                 && !restorePRNGs && !savePRNGs);
+      rule genRandomData (seeded && !waitWire && !prePostActive);
         randomGens[i];
+        let r <- getRandom();
+        rstate <= r;
+        if (loadSeedWire matches tagged Valid .s) begin
+          savedSeed <= s;
+        end else if (doSetSeed) begin
+          savedSeed <= seed;
+          setSeed(seed);
+        end else if (restorePRNGs) begin
+          seed <= savedSeed;
+          setSeed(savedSeed);
+        end else if (incSeed) begin
+          seed <= seed+1;
+        end
       endrule
     end
 
@@ -1449,25 +1325,8 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
   // PRNGs: loading, storing, saving, and restoring
   // ----------------------------------------------
 
-  RotatingQueue#(Bit#(32)) shadows <- mkRotatingQueue(numPRNGs);
   Reg#(Bit#(32)) iterCount         <- mkReg(0);
   Reg#(Bool) loopDone              <- mkReg(False);
-
-  // Copy the value of each PRNG to the corresponding shadow register
-
-  rule ruleSavePRNGs (savePRNGs);
-    function Bit#(32) val(PRNG16 x) = x.value;
-    function Action stall(PRNG16 x) = x.stall;
-    shadows.store(List::map(val, prngs));
-    let _ <- List::mapM(stall, prngs);
-  endrule
-
-  // Copy the value of each shadow register the to corresponding PRNG
-
-  rule ruleRestorePRNGs (seeded && !actionsEnabled && restorePRNGs);
-    function Action f(PRNG16 x, Bit#(32) y) = x.seed(y);
-    let _ <- List::zipWithM(f, prngs, shadows.load);
-  endrule
 
   // Load a file of seeds into the shadow PRNGs
 
@@ -1498,16 +1357,12 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         iterCount <= 0;
       endaction
 
-      // Load PRNG seeds
-      while (!loopDone)
-        action
-          let x <- getWord(seedFile);
-          shadows.put(x);
-
-          // Increment loop counter
-          iterCount <= iterCount+1;
-          if (iterCount+1 == fromInteger(numPRNGs)) loopDone <= True;
-        endaction
+      // Load PRNG seed
+      action
+        await(seeded);
+        let x <- getWord(seedFile);
+        loadSeedWire <= Valid(x);
+      endaction
 
       // Load time FIFO
       if (viewFlag)
@@ -1528,7 +1383,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
       $fclose(seedFile);
     endseq;
 
-  // Store the values of the shadow PRNGs to a file
+  // Store the seed file
 
   function Stmt storeToFile(Bit#(32) depth) =
     seq
@@ -1556,16 +1411,10 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
         iterCount <= 0;
       endaction
 
-      // Emit PRNG seeds
-      while (!loopDone)
-        action
-          let x <- shadows.get;
-          putWord(seedFile, x);
-
-          // Increment loop counter
-          iterCount <= iterCount+1;
-          if (iterCount+1 == fromInteger(numPRNGs)) loopDone <= True;
-        endaction
+      action
+        // Emit PRNG seed
+        putWord(seedFile, savedSeed);
+      endaction
 
       // Emit time FIFO (without destroying it)
       action
@@ -1591,88 +1440,9 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
       $fclose(seedFile);
     endseq;
 
-  // Store the values of the shadow PRNGs to a FIFO
-
-  Reg#(Bit#(32)) tmpReg     <- mkReg(0);
-  Reg#(Bit#(4)) nibbleCount <- mkReg(0);
-
-  function Action emitNibble(FIFOF#(Bit#(8)) fifo, Bit#(4) nibble) =
-    action
-      await(fifo.notFull);
-      fifo.enq(hexEncode(nibble));
-    endaction;
-
-  function Stmt emitWord(FIFOF#(Bit#(8)) fifo, Bit#(32) word) =
-    seq
-      action nibbleCount <= 0; tmpReg <= word; endaction
-      while (nibbleCount <= 7)
-        action
-          await(fifo.notFull);
-          fifo.enq(hexEncode(tmpReg[31:28]));
-          tmpReg <= tmpReg << 4;
-          nibbleCount <= nibbleCount+1;
-        endaction
-    endseq;
-
-  function Stmt storeToFIFO(FIFOF#(Bit#(8)) fifo, Bit#(32) depth) =
-    seq
-      action
-        // Write single char: '1' if counter-example found; '0' otherwise
-        await(fifo.notFull);
-        fifo.enq(failureFound ? 49 : 48);
-
-        // Initialise
-        loopDone <= False;
-        iterCount <= 0;
-      endaction
-
-      // Emit current depth
-      emitWord(fifo, depth);
-
-      // Emit PRNG seeds
-      while (!loopDone)
-        seq
-          action
-            let x <- shadows.get;
-            tmpReg <= {0, x};
-          endaction
-
-          emitWord(fifo, tmpReg);
-
-          action
-            // Increment loop counter
-            iterCount <= iterCount+1;
-            if (iterCount+1 == fromInteger(numPRNGs)) loopDone <= True;
-          endaction
-        endseq
-
-      // Emit time FIFO
-      action
-        loopDone <= False;
-        timeFIFO.enq(Invalid); // Null terminator
-      endaction
-      while (!loopDone)
-        seq
-          if (isValid(timeFIFO.first)) seq
-            emitNibble(fifo, 1);
-            emitWord(fifo, fromMaybe(?, timeFIFO.first));
-            timeFIFO.enq(timeFIFO.first);
-          endseq else
-            loopDone <= True;
-          timeFIFO.deq;
-        endseq
-      emitNibble(fifo, 0);
-
-    endseq;
-
-  // Store the values of the shadow PRNGs to file or FIFO, depending
-  // on module parameters.
-
+  // Store the values of the shadow PRNGs to file
   function Stmt storeToOutput(Bit#(32) depth);
-    if (params.outputFIFO matches tagged Valid .fifo)
-      return storeToFIFO(fifo, depth);
-    else
-      return storeToFile(depth);
+    return storeToFile(depth);
   endfunction
 
   // Single walk of the state space
@@ -1699,7 +1469,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
       while (!testDone)
         action
           await(!waitWire);
-          let nextState = bound(stateGen.out, numStates-1);
+          let nextState = bound(rstate, numStates-1);
           if (failureFound)
             begin
               count <= 0;
@@ -1772,7 +1542,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
               if (deleteNum != tagged Valid count) begin
                 timeFIFO.enq(timeFIFO.first);
                 if (omitNum != count)
-                  state <= bound(stateGen.out, numStates-1);
+                  state <= bound(rstate, numStates-1);
                 else
                   state <= 0;
               end else begin
@@ -1793,6 +1563,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
       action
         await(!waitWire);
         count <= 0;
+        incSeed.send;
       endaction
 
       prePostActive <= True;
@@ -1820,7 +1591,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
             if (timer == t) begin
               timeFIFO.deq;
               triggerView <= True;
-              state <= bound(stateGen.out, numStates-1);
+              state <= bound(rstate, numStates-1);
             end
           end
         endaction
@@ -1931,8 +1702,9 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
                 if (shrinkingEnabled || params.allowViewing) timeFIFO.clear;
                 if (resumeFlag && !resumed)
                   begin restorePRNGs.send; resumed <= True; end
-                else
-                  savePRNGs.send;
+                else begin
+                  doSetSeed.send;
+                end
               endaction
 
               // Test sequence starts here
@@ -1947,7 +1719,7 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
                   // This action only fires when not waiting for a
                   // user-defined statement to finish.
                   await(!waitWire);
-                  let nextState = bound(stateGen.out, numStates-1);
+                  let nextState = bound(rstate, numStates-1);
                   if (didFire && (shrinkingEnabled || params.allowViewing))
                     timeFIFO.enq(tagged Valid (startTime));
                   if (failureFound)
@@ -1981,7 +1753,12 @@ module [Module] mkModelChecker#( BlueCheck#(Empty) bc
               postStmt; // Execute user-defined post-statement
               prePostActive <= False;
 
-              testNum <= testNum+1;
+              action
+                await(seeded);
+                testNum <= testNum+1;
+                incSeed.send;
+              endaction
+
             endseq
 
           if (!failureFound) action
